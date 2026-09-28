@@ -1,0 +1,118 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model RobotSession {
+  id               String   @id @default(cuid())
+  orderId          String
+  robotId          String
+  startedAt        DateTime?
+  endedAt          DateTime?
+  status           String   @default("ACTIVE")
+  sessionDataJson  String?
+  sessionDataHash  String?
+  activityHash     String?
+  hashAnchored     Boolean  @default(false)
+  anchorTxHash     String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([orderId])
+  @@index([robotId])
+}
+
+model RentalSnapshot {
+  id                String   @id @default(cuid())
+  orderId           String   @unique
+  robotId           String
+  customerAddress   String
+  service           String
+  durationMinutes   Int
+  amountInr         Int
+  amountPaidWei     String
+  startTime         BigInt?
+  endTime           BigInt?
+  active            Boolean  @default(false)
+  completed         Boolean  @default(false)
+  rentalDataHash    String?
+  activityHash      String?
+  lastSyncedBlock   Int?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([orderId])
+  @@index([robotId])
+  @@index([customerAddress])
+}
+
+model ActivityAudit {
+  id               String   @id @default(cuid())
+  orderId          String
+  robotId          String
+  eventType        String
+  payloadJson      String?
+  payloadHash      String?
+  timestamp        DateTime
+  blockchainAnchored Boolean @default(false)
+  anchorTxHash     String?
+  createdAt        DateTime @default(now())
+
+  @@index([orderId])
+  @@index([robotId])
+  @@index([timestamp])
+}
+
+model BlockchainEvent {
+  id               String   @id @default(cuid())
+  txHash           String   @unique
+  blockNumber      Int
+  blockTimestamp   DateTime
+  contractAddress  String
+  eventName        String
+  eventDataJson    String
+  processed        Boolean  @default(false)
+  createdAt        DateTime @default(now())
+
+  @@index([txHash])
+  @@index([blockNumber])
+  @@index([eventName])
+}
+
+model RobotTelemetry {
+  id               String   @id @default(cuid())
+  robotId          String
+  orderId          String?
+  timestamp        DateTime
+  telemetryJson    String
+  telemetryHash    String
+  createdAt        DateTime @default(now())
+
+  @@index([robotId])
+  @@index([orderId])
+  @@index([timestamp])
+}
+
+model VerificationRecord {
+  id                String   @id @default(cuid())
+  orderId           String
+  verificationType  String
+  computedHash      String
+  storedHash        String?
+  verified          Boolean  @default(false)
+  transactionHash   String?
+  createdAt         DateTime @default(now())
+
+  @@index([orderId])
+  @@index([verificationType])
+}
+
+model SyncState {
+  id               String @id @default("blockchain")
+  lastProcessedBlock Int @default(0)
+  updatedAt        DateTime @updatedAt
+}
