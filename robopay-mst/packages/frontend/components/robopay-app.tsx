@@ -1,29 +1,23 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  createWalletClient,
+  custom,
   createPublicClient,
   formatEther,
   http,
-  keccak256,
-  encodePacked,
   parseEther,
   type Address,
   type EIP1193Provider,
   type Hex,
 } from "viem";
-import { useAccount, useBalance, useConnect, useDisconnect, useSwitchChain, useWalletClient, useWriteContract } from "wagmi";
+import { useAccount, useBalance, useConnect, useDisconnect, useSwitchChain } from "wagmi";
 import { mstTestnet } from "@/lib/chains";
 import { ROBO_PAY_ABI, ROBO_PAY_ADDRESS } from "@/lib/contract";
 import { CONTRACT_SCAN_URL, getMstscanTxUrl } from "@/lib/mstscan";
-import { shortenAddress, createOrderId, formatRobotStatus, formatRentalStatus, computeRentalDataHash, formatMstAmount, formatInrAmount } from "@/lib/blockchain";
-import type { AuditRecord, Rental, Robot, RobotStatus, TransactionState } from "@/types";
-
-const DEFAULT_ROBOTS: Robot[] = [
-  { id: "RF-01", name: "RoboFollow", service: "Human Following", status: 0, registered: true, owner: "0x0000000000000000000000000000000000000000" },
-  { id: "FC-01", name: "RoboClean", service: "Floor Cleaning", status: 0, registered: true, owner: "0x0000000000000000000000000000000000000000" },
-  { id: "ST-01", name: "RoboTrolley", service: "Smart Shopping Trolley", status: 0, registered: true, owner: "0x0000000000000000000000000000000000000000" },
-];
+import { shortenAddress, createOrderId, formatRobotStatus, formatRentalStatus, computeRentalDataHash } from "@/lib/blockchain";
+import type { Robot, RobotStatus, TransactionState } from "@/types";
 
 const PAGES = [
   "home",
@@ -33,11 +27,27 @@ const PAGES = [
   "history",
   "verify",
   "audit",
-  "admin",
   "blockchain",
 ] as const;
 
 type PageName = (typeof PAGES)[number];
+type RentalVerificationState =
+  | { status: "IDLE" | "LOADING"; orderId: string }
+  | { status: "NOT_FOUND"; orderId: string }
+  | { status: "ERROR"; orderId: string; message: string }
+  | {
+      status: "FOUND";
+      orderId: string;
+      rental: RentalDetail;
+      dataHashMatches: boolean;
+      robotStatus: RobotStatus | null;
+    };
+type ActivityAuditState =
+  | { status: "IDLE" | "LOADING"; orderId: string }
+  | { status: "NOT_FOUND"; orderId: string }
+  | { status: "ERROR"; orderId: string; message: string }
+  | { status: "PENDING"; orderId: string; rental: RentalDetail }
+  | { status: "ANCHORED"; orderId: string; rental: RentalDetail };
 
 type RentalDetail = {
   orderId: string;
@@ -112,8 +122,19 @@ function getTransactionErrorDetails(error: unknown) {
   return details.join(" | ") || (typeof error === "string" ? error : "Unknown provider error");
 }
 
-function isMatchingRoute(tab: PageName, initialTab?: PageName) {
-  return initialTab === tab;
+function isBridgeKeyProviderUpdateError(error: unknown) {
+  const diagnostic = getTransactionErrorDetails(error).toLowerCase();
+  return diagnostic.includes("bridgekey] was updated")
+    || diagnostic.includes("bridgekey was updated")
+    || diagnostic.includes("extension context invalidated");
+}
+
+function refreshAfterBridgeKeyUpdate() {
+  const recoveryKey = "robopay.bridgekey-provider-refresh-attempted";
+  if (window.sessionStorage.getItem(recoveryKey) === "1") return false;
+  window.sessionStorage.setItem(recoveryKey, "1");
+  window.setTimeout(() => window.location.reload(), 250);
+  return true;
 }
 
 export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
@@ -126,37 +147,34 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
     chainId: mstTestnet.id,
     query: { enabled: Boolean(address) },
   });
-  const { data: walletClient } = useWalletClient({ chainId: mstTestnet.id, connector: activeConnector });
-  const { writeContract } = useWriteContract();
-
   const [activeTab, setActiveTab] = useState<PageName>(initialTab);
-  const [robots, setRobots] = useState<Robot[]>(DEFAULT_ROBOTS);
-  const [rentalOrderIds, setRentalOrderIds] = useState<string[]>([]);
+  const [robots, setRobots] = useState<Robot[]>([]);
   const [rentals, setRentals] = useState<RentalDetail[]>([]);
   const [robotPrices, setRobotPrices] = useState<Record<string, Array<{ durationMinutes: number; amountInr: bigint; payment: bigint }>>>({});
   const [selectedRobotId, setSelectedRobotId] = useState("RF-01");
   const [selectedDuration, setSelectedDuration] = useState(10);
+  const [currentOrderId, setCurrentOrderId] = useState(createOrderId);
   const [verifyOrderId, setVerifyOrderId] = useState("");
-  const [verificationResult, setVerificationResult] = useState<{ rental?: RentalDetail; verified: boolean; type: "rental" | "activity" | null } | null>(null);
+  const [verificationResult, setVerificationResult] = useState<RentalVerificationState>({ status: "IDLE", orderId: "" });
+  const [auditResult, setAuditResult] = useState<ActivityAuditState>({ status: "IDLE", orderId: "" });
   const [confirmation, setConfirmation] = useState<ConfirmationState>(null);
   const [txHash, setTxHash] = useState<Hex | null>(null);
+  const [lastRentalTx, setLastRentalTx] = useState<{ orderId: string; hash: Hex } | null>(null);
   const [txState, setTxState] = useState<TransactionState>("DISCONNECTED");
   const [toast, setToast] = useState<ContractMessage | null>(null);
-  const [isLoadingRobots, setIsLoadingRobots] = useState(false);
+  const [isLoadingRobots, setIsLoadingRobots] = useState(true);
   const [isLoadingRentals, setIsLoadingRentals] = useState(false);
-  const [isLoadingAdmin, setIsLoadingAdmin] = useState(false);
   const [packageLoadState, setPackageLoadState] = useState<PackageLoadState>("INITIAL");
   const [packageLoadError, setPackageLoadError] = useState<string | null>(null);
-  const [adminOwner, setAdminOwner] = useState<string | null>(null);
-  const [contractBalance, setContractBalance] = useState<bigint | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [orderSearch, setOrderSearch] = useState("");
-  const [activityHash, setActivityHash] = useState("");
-  const [newActivityHash, setNewActivityHash] = useState("");
-  const [activityHashTx, setActivityHashTx] = useState<Hex | null>(null);
   const [isSubmittingPayment, setIsSubmittingPayment] = useState(false);
   const [isTransactionLocked, setIsTransactionLocked] = useState(false);
+  const [completingOrders, setCompletingOrders] = useState<string[]>([]);
+  const [currentTimeSeconds, setCurrentTimeSeconds] = useState(() => Math.floor(Date.now() / 1000));
   const transactionLock = useRef(false);
+  const expiryAttempts = useRef(new Map<string, number>());
+  const expiryInFlight = useRef(new Set<string>());
 
   const hasWalletAccount = isConnected && Boolean(address);
   const walletConnected = hasWalletAccount && Number.isSafeInteger(chainId);
@@ -172,12 +190,54 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         ? "MST Testnet Connected"
         : "Wrong Network";
   const selectedRobot = robots.find((robot) => robot.id === selectedRobotId) ?? robots[0];
+  const walletRequiredPage = activeTab === "robot" || activeTab === "rentals" || activeTab === "history";
+
+  useEffect(() => {
+    if (!connectedAddress || !isMstTestnet) {
+      setVerificationResult({ status: "IDLE", orderId: "" });
+      setAuditResult({ status: "IDLE", orderId: "" });
+    }
+  }, [connectedAddress, isMstTestnet]);
 
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(null), 2800);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    setCurrentOrderId(createOrderId());
+  }, [selectedRobotId, selectedDuration]);
+
+  useEffect(() => {
+    if (walletConnected && isMstTestnet) {
+      window.sessionStorage.removeItem("robopay.bridgekey-provider-refresh-attempted");
+    }
+  }, [walletConnected, isMstTestnet, address]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setCurrentTimeSeconds(Math.floor(Date.now() / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    void refreshRobots();
+    void refreshRentals();
+    const refreshAvailability = () => {
+      if (document.visibilityState === "visible") {
+        void refreshRobots();
+        void refreshRentals();
+      }
+    };
+    const interval = window.setInterval(refreshAvailability, 15_000);
+    document.addEventListener("visibilitychange", refreshAvailability);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshAvailability);
+    };
+    // Public contract reads keep availability accurate before wallet connection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const refreshRobots = async () => {
     setIsLoadingRobots(true);
@@ -223,11 +283,6 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
   };
 
   const refreshRentals = async () => {
-    if (!walletConnected || !isMstTestnet) {
-      setRentals([]);
-      return;
-    }
-
     setIsLoadingRentals(true);
     try {
       const orderIds = (await publicClient.readContract({
@@ -235,8 +290,6 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         abi: ROBO_PAY_ABI,
         functionName: "getRentalOrderIds",
       })) as string[];
-
-      setRentalOrderIds(orderIds);
 
       const list = await Promise.all(
         orderIds.map(async (orderId) => {
@@ -268,31 +321,10 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
       setRentals(list);
     } catch (error) {
       console.error(error);
+      setRentals([]);
       setToast({ type: "error", text: "Unable to read rental history from the contract." });
     } finally {
       setIsLoadingRentals(false);
-    }
-  };
-
-  const refreshAdminMeta = async () => {
-    try {
-      setIsLoadingAdmin(true);
-      const owner = (await publicClient.readContract({
-        address: ROBO_PAY_ADDRESS,
-        abi: ROBO_PAY_ABI,
-        functionName: "owner",
-      })) as Address;
-      setAdminOwner(owner);
-      const balance = (await publicClient.readContract({
-        address: ROBO_PAY_ADDRESS,
-        abi: ROBO_PAY_ABI,
-        functionName: "contractBalance",
-      })) as bigint;
-      setContractBalance(balance);
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setIsLoadingAdmin(false);
     }
   };
 
@@ -308,11 +340,8 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
     }
 
     setTxState("CONNECTED_MST_TESTNET");
-    refreshRobots();
-    refreshRentals();
-    refreshAdminMeta();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [walletConnected, address, chainId, isMstTestnet]);
+  }, [walletConnected, address, chainId, isMstTestnet, connectedAddress]);
 
   useEffect(() => {
     if (!selectedRobotId) {
@@ -397,13 +426,31 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
 
   const pricingForSelectedRobot = robotPrices[selectedRobotId] ?? [];
   const selectedPackage = pricingForSelectedRobot.find((entry) => entry.durationMinutes === selectedDuration) ?? pricingForSelectedRobot[0];
-  const currentOrderId = useMemo(() => createOrderId(), [activeTab]);
-
-  const activeRentals = rentals.filter((rental) => rental.active && rental.customer.toLowerCase() === address?.toLowerCase());
-  const historyRentals = [...rentals].sort((a, b) => Number(b.startTime - a.startTime));
+  const customerRentals = connectedAddress
+    ? rentals.filter((rental) => rental.customer.toLowerCase() === connectedAddress.toLowerCase())
+    : [];
+  const activeRentals = customerRentals.filter((rental) => rental.active);
+  const historyRentals = [...customerRentals].sort((a, b) => Number(b.startTime - a.startTime));
   const availableRobotCount = robots.filter((robot) => robot.status === 0 && robot.registered).length;
-  const activeRentalCount = rentals.filter((rental) => rental.active).length;
-  const completedRentalCount = rentals.filter((rental) => rental.completed).length;
+  const activeRentalCount = customerRentals.filter((rental) => rental.active).length;
+  const completedRentalCount = customerRentals.filter((rental) => rental.completed).length;
+
+  const getRobotUsageMessage = (robotId: string) => {
+    const activeRental = rentals.find((rental) => rental.robotId === robotId && rental.active);
+    if (!activeRental) return "Currently in use. Active rental timing is unavailable from current contract data.";
+
+    const endTimeSeconds = Number(activeRental.endTime);
+    const remainingSeconds = Math.max(endTimeSeconds - currentTimeSeconds, 0);
+    const endTime = new Date(endTimeSeconds * 1000).toLocaleString();
+    if (remainingSeconds === 0) {
+      return `Usage period ended at ${endTime}. The robot remains unavailable until endRental is confirmed on MST Testnet.`;
+    }
+
+    const hours = Math.floor(remainingSeconds / 3600);
+    const minutes = Math.floor((remainingSeconds % 3600) / 60);
+    const seconds = remainingSeconds % 60;
+    return `Usage ends at ${endTime} (${hours}h ${minutes}m ${seconds}s remaining). Availability updates only after on-chain completion.`;
+  };
 
   const handleSwitchToMstTestnet = async () => {
     if (!switchChainAsync) return;
@@ -461,6 +508,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         });
       }
       if (result.chainId === mstTestnet.id) {
+        window.sessionStorage.removeItem("robopay.bridgekey-provider-refresh-attempted");
         setTxState("CONNECTED_MST_TESTNET");
         setToast({ type: "success", text: "BridgeKey connected to MST Testnet." });
       } else {
@@ -471,6 +519,11 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown provider error";
       console.error("[BridgeKey] connection failed", { name: error instanceof Error ? error.name : "Error", message });
+      if (isBridgeKeyProviderUpdateError(error)) {
+        setTxState("PROVIDER_REFRESH_REQUIRED");
+        setToast({ type: "info", text: "BridgeKey updated its wallet session. RoboPay is reconnecting." });
+        if (refreshAfterBridgeKeyUpdate()) return;
+      }
       const normalized = message.toLowerCase();
       setTxState(normalized.includes("reject") ? "USER_REJECTED" : "DISCONNECTED");
       setToast({
@@ -486,8 +539,47 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
     }
   };
 
-  const createUniqueOrderId = async () => {
-    let nextOrder = createOrderId();
+  const getFreshBridgeKeySession = async (expectedAccount: Address) => {
+    const connector = activeConnector;
+    if (!connector) throw new Error("BridgeKey connector is not connected.");
+
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const provider = await connector.getProvider() as BridgeKeyEip1193Provider | undefined;
+      if (!provider || provider.isBridgeKey !== true) {
+        throw new Error("BridgeKey provider unavailable.");
+      }
+
+      try {
+        const accounts = await provider.request({ method: "eth_accounts" });
+        const liveChain = await provider.request({ method: "eth_chainId" });
+        const liveAccount = Array.isArray(accounts) ? usingAddress(accounts[0]) : undefined;
+        const liveChainId = typeof liveChain === "string" ? Number(BigInt(liveChain)) : NaN;
+        if (!liveAccount) throw new Error("BridgeKey returned no selected account.");
+        if (liveAccount.toLowerCase() !== expectedAccount.toLowerCase()) {
+          throw new Error("BridgeKey account changed. Select the intended customer account and retry.");
+        }
+        if (liveChainId !== mstTestnet.id) {
+          throw new Error(`Wrong network: BridgeKey is on chain ${liveChainId}; MST Testnet (${mstTestnet.id}) is required.`);
+        }
+
+        const walletClient = createWalletClient({
+          account: liveAccount,
+          chain: mstTestnet,
+          transport: custom(provider),
+        });
+        return { provider, walletClient, account: liveAccount, chainId: liveChainId };
+      } catch (error) {
+        lastError = error;
+        if (!isBridgeKeyProviderUpdateError(error) || attempt === 1) throw error;
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error("BridgeKey wallet session could not be refreshed.");
+  };
+
+  const createUniqueOrderId = async (candidateOrderId: string) => {
+    let nextOrder = candidateOrderId;
     let exists = true;
 
     while (exists) {
@@ -533,7 +625,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
       return;
     }
 
-    const nextOrderId = await createUniqueOrderId();
+    const nextOrderId = await createUniqueOrderId(currentOrderId);
     const orderPayload = {
       orderId: nextOrderId,
       robotId: robot.id,
@@ -560,9 +652,8 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
 
     const lock = confirmation;
     const account = connectedAddress;
-    const connector = activeConnector;
     let submittedHash: Hex | undefined;
-    let transactionStage = "validating active wallet provider";
+    let transactionStage = "refreshing the live BridgeKey session";
     transactionLock.current = true;
     setIsTransactionLocked(true);
     setIsSubmittingPayment(true);
@@ -576,44 +667,32 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
     }, 90_000);
 
     try {
-      if (!connector) throw new Error("The connected wallet connector is unavailable.");
-
-      const provider = await connector.getProvider() as BridgeKeyEip1193Provider | undefined;
-      const isBridgeKeyProvider = provider?.isBridgeKey === true;
+      const session = await getFreshBridgeKeySession(account);
+      const { walletClient, account: freshAccount, chainId: freshChainId } = session;
       if (process.env.NODE_ENV === "development") {
-        console.info("[wallet] transaction connector/provider", {
-          connectorId: connector.id,
-          connectorName: connector.name,
-          connectorType: connector.type,
-          providerDetected: Boolean(provider),
-          isBridgeKeyProvider,
+        console.info("[wallet] refreshed transaction identity", {
+          connectorId: activeConnector?.id,
+          connectorName: activeConnector?.name,
+          providerDetected: true,
+          account: freshAccount,
+          chainId: freshChainId,
         });
       }
-      if (!provider) throw new Error("BridgeKey provider unavailable.");
-      if (!isBridgeKeyProvider) {
-        throw new Error(`The active provider is not BridgeKey (connector ${connector.id}/${connector.name}).`);
-      }
 
-      transactionStage = "checking BridgeKey account and chain";
-      const [providerAccounts, providerChain] = await Promise.all([
-        provider.request({ method: "eth_accounts" }),
-        provider.request({ method: "eth_chainId" }),
-      ]);
-      const providerAccount = Array.isArray(providerAccounts) ? providerAccounts[0] : undefined;
-      const providerChainId = typeof providerChain === "string" ? Number(BigInt(providerChain)) : NaN;
-
-      if (typeof providerAccount !== "string" || providerAccount.toLowerCase() !== account.toLowerCase()) {
-        throw new Error("BridgeKey account does not match the selected RoboPay account.");
-      }
-      if (providerChainId !== mstTestnet.id || chainId !== mstTestnet.id) {
-        throw new Error(`Switch to MST Testnet. BridgeKey chain ID: ${providerChainId}.`);
-      }
-      if (process.env.NODE_ENV === "development") {
-        console.info("[wallet] transaction identity verified", { account, chainId: providerChainId });
-      }
-
-      transactionStage = "checking contract package price";
-      const [requiredPayment, requiredAmountInr] = await Promise.all([
+      transactionStage = "checking robot availability, order ID, contract package price and customer balance";
+      const [robotPreflightData, orderExists, requiredPayment, requiredAmountInr, balance] = await Promise.all([
+        publicClient.readContract({
+          address: ROBO_PAY_ADDRESS,
+          abi: ROBO_PAY_ABI,
+          functionName: "getRobot",
+          args: [lock.robotId],
+        }),
+        publicClient.readContract({
+          address: ROBO_PAY_ADDRESS,
+          abi: ROBO_PAY_ABI,
+          functionName: "orderExists",
+          args: [lock.orderId],
+        }),
         publicClient.readContract({
           address: ROBO_PAY_ADDRESS,
           abi: ROBO_PAY_ABI,
@@ -626,11 +705,21 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
           functionName: "requiredAmountInr",
           args: [lock.robotId, BigInt(lock.durationMinutes)],
         }),
+        publicClient.getBalance({ address: freshAccount }),
       ]);
+
+      const robot = robotPreflightData as [string, string, string, Address, number, boolean];
+      if (!robot[5]) throw new Error(`Robot ${lock.robotId} is not registered on the contract.`);
+      if (Number(robot[4]) !== 0) {
+        await refreshRobots();
+        throw new Error(`Robot ${lock.robotId} is currently IN_USE on MST Testnet.`);
+      }
+      if (orderExists) throw new Error(`Order ID ${lock.orderId} already exists. Create a new rental confirmation.`);
 
       if (requiredPayment !== lock.payment || requiredAmountInr !== lock.amountInr) {
         throw new Error("The selected package no longer matches the contract price. Re-select the package.");
       }
+      if (balance < requiredPayment) throw new Error("Insufficient tMSTC balance for the rental payment.");
 
       console.info("[BridgeKey] rentRobot request", {
         target: ROBO_PAY_ADDRESS,
@@ -645,18 +734,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         nativeValueWei: requiredPayment.toString(),
       });
 
-      if (!walletClient) {
-        throw new Error("Wagmi did not provide a BridgeKey wallet client for MST Testnet.");
-      }
-      const walletClientAccount = typeof walletClient.account === "string"
-        ? walletClient.account
-        : walletClient.account.address;
-      if (walletClientAccount.toLowerCase() !== account.toLowerCase()) {
-        throw new Error("The BridgeKey wallet client account does not match the selected account.");
-      }
-      if (walletClient.chain?.id !== mstTestnet.id) {
-        throw new Error(`BridgeKey wallet client is on chain ${walletClient.chain?.id ?? "unknown"}.`);
-      }
+      const walletClientAccount = walletClient.account.address;
 
       transactionStage = "estimating rentRobot gas through the MST Testnet RPC";
       const transactionArgs = [
@@ -671,9 +749,16 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         abi: ROBO_PAY_ABI,
         functionName: "rentRobot",
         args: transactionArgs,
-        account,
+        account: freshAccount,
         value: requiredPayment,
       });
+      const [gasPrice, balanceAfterEstimate] = await Promise.all([
+        publicClient.getGasPrice(),
+        publicClient.getBalance({ address: freshAccount }),
+      ]);
+      if (balanceAfterEstimate < requiredPayment + gas * gasPrice) {
+        throw new Error("Insufficient tMSTC balance to cover rental payment and estimated network fees.");
+      }
 
       transactionStage = "BridgeKey eth_sendTransaction wallet approval";
       console.info("[BridgeKey] walletClient.writeContract using active BridgeKey signer; expected wallet RPC: eth_sendTransaction", {
@@ -686,13 +771,15 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         abi: ROBO_PAY_ABI,
         functionName: "rentRobot",
         args: transactionArgs,
-        account,
+        account: freshAccount,
         chain: mstTestnet,
         gas,
         value: requiredPayment,
       });
 
       submittedHash = txHashValue;
+      window.sessionStorage.removeItem("robopay.bridgekey-provider-refresh-attempted");
+      setLastRentalTx({ orderId: lock.orderId, hash: txHashValue });
       window.clearTimeout(requestTimeout);
       setIsSubmittingPayment(false);
       setTxHash(txHashValue);
@@ -762,6 +849,11 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         setToast({ type: "error", text: "Transaction was submitted, but confirmation is delayed. Check MSTScan." });
       } else {
         setTxState(output.includes("reject") ? "USER_REJECTED" : "TRANSACTION_FAILED");
+        if (isBridgeKeyProviderUpdateError(error)) {
+          setTxState("PROVIDER_REFRESH_REQUIRED");
+          setToast({ type: "info", text: "BridgeKey refreshed its provider. RoboPay is reconnecting to the updated wallet session." });
+          if (refreshAfterBridgeKeyUpdate()) return;
+        }
         setToast({
           type: "error",
           text: output.includes("reject")
@@ -792,37 +884,54 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
     }
   };
 
-  const handleVerify = async (orderId: string, mode: "rental" | "activity") => {
-    if (!orderId.trim()) {
-      setVerificationResult({ verified: false, type: mode, rental: undefined });
+  const readRentalRecord = async (orderId: string): Promise<RentalDetail | null> => {
+    const exists = await publicClient.readContract({
+      address: ROBO_PAY_ADDRESS,
+      abi: ROBO_PAY_ABI,
+      functionName: "orderExists",
+      args: [orderId],
+    });
+    if (!exists) return null;
+
+    const rentalData = (await publicClient.readContract({
+      address: ROBO_PAY_ADDRESS,
+      abi: ROBO_PAY_ABI,
+      functionName: "getRental",
+      args: [orderId],
+    })) as [string, string, string, bigint, bigint, bigint, Address, bigint, bigint, boolean, boolean, Hex, Hex];
+
+    return {
+      orderId: rentalData[0],
+      robotId: rentalData[1],
+      service: rentalData[2],
+      durationMinutes: rentalData[3],
+      amountInr: rentalData[4],
+      amountPaidWei: rentalData[5],
+      customer: rentalData[6],
+      startTime: rentalData[7],
+      endTime: rentalData[8],
+      active: rentalData[9],
+      completed: rentalData[10],
+      activityHash: rentalData[11],
+      rentalDataHash: rentalData[12],
+    } satisfies RentalDetail;
+  };
+
+  const verifyRentalOrder = async (rawOrderId: string) => {
+    const orderId = rawOrderId.trim();
+    if (!orderId) {
+      setVerificationResult({ status: "ERROR", orderId, message: "Enter an Order ID to verify." });
       return;
     }
-
+    setVerificationResult({ status: "LOADING", orderId });
     try {
-      const rentalData = (await publicClient.readContract({
-        address: ROBO_PAY_ADDRESS,
-        abi: ROBO_PAY_ABI,
-        functionName: "getRental",
-        args: [orderId],
-      })) as [string, string, string, bigint, bigint, bigint, Address, bigint, bigint, boolean, boolean, Hex, Hex];
+      const rental = await readRentalRecord(orderId);
+      if (!rental) {
+        setVerificationResult({ status: "NOT_FOUND", orderId });
+        return;
+      }
 
-      const rental = {
-        orderId: rentalData[0],
-        robotId: rentalData[1],
-        service: rentalData[2],
-        durationMinutes: rentalData[3],
-        amountInr: rentalData[4],
-        amountPaidWei: rentalData[5],
-        customer: rentalData[6],
-        startTime: rentalData[7],
-        endTime: rentalData[8],
-        active: rentalData[9],
-        completed: rentalData[10],
-        activityHash: rentalData[11],
-        rentalDataHash: rentalData[12],
-      } satisfies RentalDetail;
-
-      const nextHash = computeRentalDataHash(
+      const computedHash = computeRentalDataHash(
         rental.orderId,
         rental.robotId,
         rental.service,
@@ -832,123 +941,140 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         rental.startTime,
         rental.endTime,
       );
-
-      const verified = mode === "rental"
-        ? (await publicClient.readContract({
-            address: ROBO_PAY_ADDRESS,
-            abi: ROBO_PAY_ABI,
-            functionName: "verifyRentalDataHash",
-            args: [orderId, nextHash],
-          })) as boolean
-        : (await publicClient.readContract({
-            address: ROBO_PAY_ADDRESS,
-            abi: ROBO_PAY_ABI,
-            functionName: "verifyActivityHash",
-            args: [orderId, keccak256(encodePacked(["string"], [activityHash]))],
-          })) as boolean;
-
-      setVerificationResult({ rental, verified, type: mode });
-      setToast({ type: verified ? "success" : "error", text: verified ? "Verification successful on MST blockchain." : "Hash does not match the blockchain record." });
-    } catch (error) {
-      console.error(error);
-      setVerificationResult({ verified: false, type: mode, rental: undefined });
-      setToast({ type: "error", text: "Unable to verify this rental on the blockchain." });
-    }
-  };
-
-  const endRentalFromContract = async (orderId: string) => {
-    try {
-      const tx = await new Promise<Hex>((resolve, reject) => {
-        writeContract({
+      const contractVerification = await publicClient.readContract({
+        address: ROBO_PAY_ADDRESS,
+        abi: ROBO_PAY_ABI,
+        functionName: "verifyRentalDataHash",
+        args: [rental.orderId, computedHash],
+      }) as boolean;
+      const dataHashMatches = contractVerification && computedHash.toLowerCase() === rental.rentalDataHash.toLowerCase();
+      let robotStatus: RobotStatus | null = null;
+      try {
+        const robotData = await publicClient.readContract({
           address: ROBO_PAY_ADDRESS,
           abi: ROBO_PAY_ABI,
-          functionName: "endRental",
-          args: [orderId],
-        }, {
-          onSuccess: (hash) => resolve(hash),
-          onError: (error) => reject(error),
-        });
-      });
+          functionName: "getRobot",
+          args: [rental.robotId],
+        }) as [string, string, string, Address, number, boolean];
+        robotStatus = Number(robotData[4]) as RobotStatus;
+      } catch (error) {
+        console.warn("Unable to read robot state during rental verification", error);
+      }
 
-      await publicClient.waitForTransactionReceipt({ hash: tx });
-      await refreshRentals();
-      await refreshRobots();
-      setToast({ type: "success", text: "Rental completed and robot returned to availability." });
+      setVerificationResult({ status: "FOUND", orderId, rental, dataHashMatches, robotStatus });
     } catch (error) {
-      console.error(error);
-      setToast({ type: "error", text: "The rental completion transaction could not be confirmed." });
+      console.error("Rental verification failed", error);
+      setVerificationResult({ status: "ERROR", orderId, message: "Unable to read this rental from MST Testnet. Check the network and retry." });
     }
   };
 
-  const recordActivityHash = async () => {
-    if (!newActivityHash.trim() || !orderSearch.trim()) return;
+  const loadActivityAudit = async (rawOrderId: string) => {
+    const orderId = rawOrderId.trim();
+    if (!orderId) {
+      setAuditResult({ status: "ERROR", orderId, message: "Enter an Order ID to load its robot session audit." });
+      return;
+    }
+    setAuditResult({ status: "LOADING", orderId });
+    try {
+      const rental = await readRentalRecord(orderId);
+      if (!rental) {
+        setAuditResult({ status: "NOT_FOUND", orderId });
+        return;
+      }
+
+      const hasActivityHash = !/^0x0{64}$/i.test(rental.activityHash);
+      setAuditResult({ status: hasActivityHash ? "ANCHORED" : "PENDING", orderId, rental });
+    } catch (error) {
+      console.error("Activity audit lookup failed", error);
+      setAuditResult({ status: "ERROR", orderId, message: "Unable to load this rental from MST Testnet. Check the network and retry." });
+    }
+  };
+
+  const endRentalFromContract = async (orderId: string, automatic = false) => {
+    if (!connectedAddress || !isMstTestnet) {
+      if (!automatic) setToast({ type: "error", text: "Connect BridgeKey on MST Testnet to complete this rental." });
+      return;
+    }
+    if (expiryInFlight.current.has(orderId)) return;
+    if (automatic && (expiryAttempts.current.get(orderId) ?? 0) > 0) return;
+    expiryInFlight.current.add(orderId);
+    setCompletingOrders((current) => current.includes(orderId) ? current : [...current, orderId]);
 
     try {
-      const tx = await new Promise<Hex>((resolve, reject) => {
-        writeContract({
-          address: ROBO_PAY_ADDRESS,
-          abi: ROBO_PAY_ABI,
-          functionName: "recordActivityHash",
-          args: [orderSearch, keccak256(encodePacked(["string"], [newActivityHash]))],
-        }, {
-          onSuccess: (hash) => resolve(hash),
-          onError: (error) => reject(error),
-        });
+      const chainRental = await readRentalRecord(orderId);
+      if (!chainRental) throw new Error("Rental was not found on MST Testnet.");
+      if (chainRental.customer.toLowerCase() !== connectedAddress.toLowerCase()) {
+        throw new Error("Only the customer who created this rental can complete it from the customer app.");
+      }
+      if (!chainRental.active) {
+        await Promise.all([refreshRentals(), refreshRobots()]);
+        return;
+      }
+      if (currentTimeSeconds < Number(chainRental.endTime) && automatic) return;
+
+      const session = await getFreshBridgeKeySession(connectedAddress);
+      const gas = await publicClient.estimateContractGas({
+        address: ROBO_PAY_ADDRESS,
+        abi: ROBO_PAY_ABI,
+        functionName: "endRental",
+        args: [orderId],
+        account: session.account,
+      });
+      const txHashValue = await session.walletClient.writeContract({
+        address: ROBO_PAY_ADDRESS,
+        abi: ROBO_PAY_ABI,
+        functionName: "endRental",
+        args: [orderId],
+        account: session.account,
+        chain: mstTestnet,
+        gas,
       });
 
-      await publicClient.waitForTransactionReceipt({ hash: tx });
-      setActivityHashTx(tx);
-      setToast({ type: "success", text: "Activity hash anchored to the blockchain." });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHashValue, timeout: 120_000 });
+      if (receipt.status !== "success") throw new Error("endRental reverted on MST Testnet.");
+
+      const [confirmedRental, robotData] = await Promise.all([
+        readRentalRecord(orderId),
+        publicClient.readContract({
+          address: ROBO_PAY_ADDRESS,
+          abi: ROBO_PAY_ABI,
+          functionName: "getRobot",
+          args: [chainRental.robotId],
+        }) as Promise<[string, string, string, Address, number, boolean]>,
+      ]);
+      if (!confirmedRental || confirmedRental.active || !confirmedRental.completed || Number(robotData[4]) !== 0) {
+        throw new Error("The completion transaction was mined, but rental/robot state has not reached the expected completed/available state.");
+      }
+
+      await Promise.all([refreshRentals(), refreshRobots()]);
+      expiryAttempts.current.delete(orderId);
+      setToast({ type: "success", text: `Rental ${orderId} completed on MST Testnet.` });
     } catch (error) {
-      console.error(error);
-      setToast({ type: "error", text: "The activity hash could not be recorded on-chain." });
+      const diagnostic = getTransactionErrorDetails(error);
+      console.error("[Rental expiry] endRental failed", { orderId, automatic, diagnostic, error });
+      const attempts = (expiryAttempts.current.get(orderId) ?? 0) + 1;
+      expiryAttempts.current.set(orderId, attempts);
+      if (!automatic || attempts >= 1) {
+        setToast({ type: "error", text: `Rental time has ended, but blockchain completion is still pending. ${diagnostic}` });
+      }
+    } finally {
+      expiryInFlight.current.delete(orderId);
+      setCompletingOrders((current) => current.filter((entry) => entry !== orderId));
     }
   };
 
-  const withdrawBalance = async () => {
-    try {
-      const tx = await new Promise<Hex>((resolve, reject) => {
-        writeContract({
-          address: ROBO_PAY_ADDRESS,
-          abi: ROBO_PAY_ABI,
-          functionName: "withdraw",
-        }, {
-          onSuccess: (hash) => resolve(hash),
-          onError: (error) => reject(error),
-        });
-      });
-
-      await publicClient.waitForTransactionReceipt({ hash: tx });
-      setToast({ type: "success", text: "Owner withdrawal executed." });
-      await refreshAdminMeta();
-    } catch (error) {
-      console.error(error);
-      setToast({ type: "error", text: "Withdrawal was rejected or failed." });
+  useEffect(() => {
+    if (!isMstTestnet || !connectedAddress) return;
+    const expired = activeRentals.filter((rental) => Number(rental.endTime) <= currentTimeSeconds);
+    for (const rental of expired) {
+      if (!expiryAttempts.current.has(rental.orderId)) {
+        expiryAttempts.current.set(rental.orderId, 0);
+        void endRentalFromContract(rental.orderId, true);
+      }
     }
-  };
-
-  const setRobotStatus = async (robotId: string, nextStatus: 0 | 1) => {
-    try {
-      const tx = await new Promise<Hex>((resolve, reject) => {
-        writeContract({
-          address: ROBO_PAY_ADDRESS,
-          abi: ROBO_PAY_ABI,
-          functionName: "setRobotAvailability",
-          args: [robotId, nextStatus],
-        }, {
-          onSuccess: (hash) => resolve(hash),
-          onError: (error) => reject(error),
-        });
-      });
-
-      await publicClient.waitForTransactionReceipt({ hash: tx });
-      await refreshRobots();
-      setToast({ type: "success", text: `Robot ${robotId} is now ${nextStatus === 0 ? "AVAILABLE" : "IN_USE"}.` });
-    } catch (error) {
-      console.error(error);
-      setToast({ type: "error", text: "Availability update failed." });
-    }
-  };
+    // endRentalFromContract guards concurrent calls and verifies canonical chain state before mutation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTimeSeconds, isMstTestnet, connectedAddress, activeRentals.length]);
 
   const renderHome = () => (
     <div className="page-shell">
@@ -1041,7 +1167,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         <div className="glass-card stat-card"><span>Available robots</span><strong>{availableRobotCount}</strong></div>
         <div className="glass-card stat-card"><span>Active rentals</span><strong>{activeRentalCount}</strong></div>
         <div className="glass-card stat-card"><span>Completed rentals</span><strong>{completedRentalCount}</strong></div>
-        <div className="glass-card stat-card"><span>Total rentals</span><strong>{rentals.length}</strong></div>
+        <div className="glass-card stat-card"><span>Total rentals</span><strong>{customerRentals.length}</strong></div>
       </section>
 
       <section className="glass-card list-card">
@@ -1051,6 +1177,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         {isLoadingRobots ? (
           <div className="loading-block">Loading robot status from blockchain…</div>
         ) : (
+          robots.length === 0 ? <div className="loading-block">No robots are registered in the RoboPay contract.</div> :
           <div className="robot-grid">
             {robots.map((robot) => (
               <div key={robot.id} className="robot-card glass-subcard">
@@ -1062,6 +1189,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
                   <span className={`status-pill ${robot.status === 0 ? "status-available" : "status-inuse"}`}>{formatRobotStatus(robot.status)}</span>
                 </div>
                 <p>{robot.service}</p>
+                {robot.status === 1 ? <p className="network-banner">{getRobotUsageMessage(robot.id)}</p> : null}
                 <div className="pricing-list">
                   {(robotPricingMap[robot.id] ?? [10]).map((duration) => {
                     const price = robotPrices[robot.id]?.find((item) => item.durationMinutes === duration);
@@ -1074,11 +1202,11 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
                     );
                   })}
                 </div>
-                <button className="primary compact" onClick={() => {
+                <button className="primary compact" disabled={robot.status !== 0} onClick={() => {
                   setSelectedRobotId(robot.id);
                   setSelectedDuration(robotPricingMap[robot.id]?.[0] ?? 10);
                   setActiveTab("robot");
-                }}>Select robot</button>
+                }}>{robot.status === 1 ? "Currently in use" : "Select robot"}</button>
               </div>
             ))}
           </div>
@@ -1103,6 +1231,10 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
           <div><label>Service</label><strong>{selectedRobot?.service}</strong></div>
           <div><label>Current availability</label><strong>{selectedRobot ? formatRobotStatus(selectedRobot.status) : "—"}</strong></div>
         </div>
+
+        {selectedRobot?.status === 1 ? (
+          <div className="network-banner">{getRobotUsageMessage(selectedRobot.id)}</div>
+        ) : null}
 
         {(!walletConnected || !isMstTestnet) && (
           <div className="network-banner">
@@ -1166,14 +1298,14 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
             </div>
             <button
               className="primary wide"
-              disabled={walletResolving || (walletConnected && isMstTestnet && (!selectedPackage || selectedRobot?.status !== 0))}
+              disabled={walletResolving || selectedRobot?.status !== 0 || (walletConnected && isMstTestnet && !selectedPackage)}
               onClick={() => {
                 if (!walletConnected) void handleConnect(bridgeKeyConnector);
                 else if (!isMstTestnet) void handleSwitchToMstTestnet();
                 else void runRentFlow();
               }}
             >
-              {walletResolving ? "Connecting…" : !walletConnected ? "Connect BridgeKey" : !isMstTestnet ? "Switch to MST Testnet" : "Rent Robot with BridgeKey"}
+              {selectedRobot?.status !== 0 ? "Currently in use" : walletResolving ? "Connecting…" : !walletConnected ? "Connect BridgeKey" : !isMstTestnet ? "Switch to MST Testnet" : "Rent Robot with BridgeKey"}
             </button>
           </div>
         )}
@@ -1220,18 +1352,20 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
     <div className="page-shell">
       <section className="glass-card list-card">
         <div className="section-header">
-          <h2>Active rentals</h2>
+          <h2>My Rentals</h2>
         </div>
         {isLoadingRentals ? (
-          <div className="loading-block">Loading active rental contracts…</div>
-        ) : activeRentals.length === 0 ? (
-          <p className="muted">No active rentals for this wallet yet.</p>
+          <div className="loading-block">Loading your rental contracts from MST Testnet…</div>
+        ) : historyRentals.length === 0 ? (
+          <p className="muted">No rentals are associated with this connected wallet.</p>
         ) : (
           <div className="rental-list">
-            {activeRentals.map((rental) => {
-              const remainingSeconds = Math.max(Number(rental.endTime - BigInt(Math.floor(Date.now() / 1000))), 0);
-              const minutes = Math.floor(remainingSeconds / 60);
+            {historyRentals.map((rental) => {
+              const remainingSeconds = Math.max(Number(rental.endTime) - currentTimeSeconds, 0);
+              const hours = Math.floor(remainingSeconds / 3600);
+              const minutes = Math.floor((remainingSeconds % 3600) / 60);
               const seconds = remainingSeconds % 60;
+              const rentalCompleting = completingOrders.includes(rental.orderId);
 
               return (
                 <div key={rental.orderId} className="glass-subcard rental-card">
@@ -1240,19 +1374,30 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
                       <div className="mini-label">{rental.orderId}</div>
                       <h4>{rental.robotId}</h4>
                     </div>
-                    <span className="status-pill status-active">ACTIVE</span>
+                    <span className={`status-pill ${rental.active ? "status-active" : ""}`}>{formatRentalStatus(rental.active, rental.completed)}</span>
                   </div>
                   <div className="meta-grid two-col">
                     <div><label>Service</label><strong>{rental.service}</strong></div>
                     <div><label>Duration</label><strong>{Number(rental.durationMinutes)} mins</strong></div>
                     <div><label>Start</label><strong>{new Date(Number(rental.startTime) * 1000).toLocaleString()}</strong></div>
                     <div><label>End</label><strong>{new Date(Number(rental.endTime) * 1000).toLocaleString()}</strong></div>
-                    <div><label>Time left</label><strong>{minutes}m {seconds}s</strong></div>
-                    <div><label>Blockchain</label><strong>Verified</strong></div>
+                    {rental.active ? <div><label>Time left</label><strong>{remainingSeconds > 0 ? `${hours}h ${minutes}m ${seconds}s` : "RENTAL TIME COMPLETED"}</strong></div> : null}
+                    <div><label>Paid</label><strong>{formatEther(rental.amountPaidWei)} tMSTC</strong></div>
                   </div>
-                  <div className="modal-actions">
-                    <button className="secondary" onClick={() => endRentalFromContract(rental.orderId)}>Complete rental</button>
-                  </div>
+                  {rental.active && remainingSeconds === 0 ? (
+                    <p className="network-banner">
+                      {rentalCompleting
+                        ? "Completing rental on MST Testnet…"
+                        : "Rental time has ended, but blockchain completion is still pending. The robot remains IN_USE until endRental is confirmed."}
+                    </p>
+                  ) : null}
+                  {rental.active ? (
+                    <div className="modal-actions">
+                      <button className="secondary" onClick={() => void endRentalFromContract(rental.orderId)} disabled={rentalCompleting || !isMstTestnet}>
+                        {rentalCompleting ? "Completing…" : remainingSeconds === 0 ? "Retry completion" : "Complete rental"}
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               );
             })}
@@ -1308,25 +1453,73 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
     <div className="page-shell">
       <section className="glass-card verify-card">
         <h2>Verify Rental</h2>
+        <p className="muted">Check whether a rental record matches the data stored on MST Testnet.</p>
         <div className="verify-input-row">
-          <input value={verifyOrderId} onChange={(e) => setVerifyOrderId(e.target.value)} placeholder="Enter order ID" />
-          <button className="primary" onClick={() => handleVerify(verifyOrderId, "rental")}>Verify rental</button>
+          <input aria-label="Order ID" value={verifyOrderId} onChange={(e) => setVerifyOrderId(e.target.value)} placeholder="Order ID" />
+          <button className="primary" onClick={() => void verifyRentalOrder(verifyOrderId)} disabled={verificationResult.status === "LOADING"}>
+            {verificationResult.status === "LOADING" ? "Checking…" : "Verify Rental"}
+          </button>
         </div>
-        {verificationResult && verificationResult.rental ? (
+        {verificationResult.status === "IDLE" && (
           <div className="verification-box glass-subcard">
-            <div className="meta-grid">
-              <div><label>Order ID</label><strong>{verificationResult.rental.orderId}</strong></div>
-              <div><label>Customer</label><strong>{shortenAddress(verificationResult.rental.customer)}</strong></div>
-              <div><label>Robot</label><strong>{verificationResult.rental.robotId}</strong></div>
-              <div><label>Duration</label><strong>{Number(verificationResult.rental.durationMinutes)} min</strong></div>
-              <div><label>Amount</label><strong>₹{Number(verificationResult.rental.amountInr).toLocaleString()}</strong></div>
-              <div><label>Status</label><strong>{verificationResult.rental.active ? "ACTIVE" : "COMPLETED"}</strong></div>
-            </div>
-            <div className="verification-badge">
-              {verificationResult.verified ? "✓ VERIFIED ON MST BLOCKCHAIN" : "✗ HASH DOES NOT MATCH"}
-            </div>
+            <strong>What this verifies</strong>
+            <ul>
+              <li>Rental exists on the RoboPay contract</li>
+              <li>Robot, customer, package, payment, and timestamps</li>
+              <li>Rental data hash against the Solidity record</li>
+              <li>Whether an activity hash has been anchored</li>
+            </ul>
           </div>
-        ) : null}
+        )}
+        {verificationResult.status === "LOADING" && <div className="loading-block">Reading the rental and hashes from MST Testnet…</div>}
+        {verificationResult.status === "NOT_FOUND" && (
+          <div className="verification-box glass-subcard"><strong>Rental Not Found</strong><p>No rental with this Order ID exists on the RoboPay contract.</p></div>
+        )}
+        {verificationResult.status === "ERROR" && (
+          <div className="verification-box glass-subcard error-banner"><strong>Verification unavailable</strong><p>{verificationResult.message}</p></div>
+        )}
+        {verificationResult.status === "FOUND" && (() => {
+          const { rental, dataHashMatches, robotStatus } = verificationResult;
+          const computedHash = computeRentalDataHash(rental.orderId, rental.robotId, rental.service, Number(rental.durationMinutes), rental.amountInr, rental.customer, rental.startTime, rental.endTime);
+          const hasActivityHash = !/^0x0{64}$/i.test(rental.activityHash);
+          const remaining = Math.max(Number(rental.endTime) - Math.floor(Date.now() / 1000), 0);
+          const dataMismatch = !dataHashMatches || computedHash.toLowerCase() !== rental.rentalDataHash.toLowerCase();
+          return (
+            <div className="verification-box glass-subcard">
+              <div className={`verification-badge ${dataMismatch ? "error-banner" : ""}`}>
+                {dataMismatch ? "TAMPER DETECTED" : rental.completed ? "RENTAL COMPLETED" : rental.active ? "RENTAL ACTIVE" : "RENTAL INACTIVE"}
+              </div>
+              {dataMismatch ? <p>The current data does not match the cryptographic record anchored on MST Testnet.</p> : null}
+              <h3>On-chain record</h3>
+              <div className="meta-grid">
+                <div><label>Order ID</label><strong>{rental.orderId}</strong></div>
+                <div><label>Robot</label><strong>{rental.robotId}</strong></div>
+                <div><label>Service</label><strong>{rental.service}</strong></div>
+                <div><label>Customer</label><strong>{rental.customer}</strong></div>
+                <div><label>Duration</label><strong>{Number(rental.durationMinutes)} min</strong></div>
+                <div><label>INR amount</label><strong>₹{Number(rental.amountInr).toLocaleString()}</strong></div>
+                <div><label>tMSTC paid</label><strong>{formatEther(rental.amountPaidWei)} tMSTC</strong></div>
+                <div><label>Start time</label><strong>{new Date(Number(rental.startTime) * 1000).toLocaleString()}</strong></div>
+                <div><label>End time</label><strong>{new Date(Number(rental.endTime) * 1000).toLocaleString()}</strong></div>
+                <div><label>Rental status</label><strong>{formatRentalStatus(rental.active, rental.completed)}</strong></div>
+                <div><label>Robot status</label><strong>{robotStatus === null ? "Unavailable" : formatRobotStatus(robotStatus)}</strong></div>
+                {rental.active && !rental.completed ? <div><label>Time remaining</label><strong>{Math.floor(remaining / 60)}m {remaining % 60}s</strong></div> : null}
+                <div><label>On-chain rental data hash</label><strong className="mono">{rental.rentalDataHash}</strong></div>
+                <div><label>Computed rental data hash</label><strong className="mono">{computedHash}</strong></div>
+                <div><label>Activity audit hash</label><strong className="mono">{rental.activityHash}</strong></div>
+              </div>
+              <h3>Verification result</h3>
+              <p>{dataMismatch ? "Rental data: HASH MISMATCH" : "Rental data: VERIFIED"}</p>
+              {hasActivityHash ? (
+                <p>Activity audit: HASH ANCHORED. Off-chain session data is unavailable for recomputation.</p>
+              ) : (
+                <p>{rental.completed ? "Activity audit: Rental completed, but activity audit was not anchored." : "Activity audit: AUDIT NOT YET ANCHORED. Robot session activity has not yet been anchored to MST Testnet."}</p>
+              )}
+              <a href={CONTRACT_SCAN_URL} target="_blank" rel="noreferrer">View Contract on MSTScan</a>
+              {lastRentalTx?.orderId === rental.orderId ? <p><a href={getMstscanTxUrl(lastRentalTx.hash)} target="_blank" rel="noreferrer">View Transaction on MSTScan</a></p> : null}
+            </div>
+          );
+        })()}
       </section>
     </div>
   );
@@ -1334,102 +1527,60 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
   const renderAudit = () => (
     <div className="page-shell">
       <section className="glass-card audit-card">
-        <h2>Robot activity audit</h2>
+        <h2>Robot Activity Audit</h2>
+        <p className="muted">Track the cryptographic proof of robot session activity. Session telemetry remains off-chain; its deterministic SHA-256 digest is anchored to MST Testnet for later recomputation.</p>
         <div className="audit-flow">
-          <span>Robot Session Data</span>
+          <span>Robot Session</span>
           <span>↓</span>
-          <span>SHA-256 Hash</span>
+          <span>Telemetry / Session Data</span>
+          <span>↓</span>
+          <span>SHA-256</span>
+          <span>↓</span>
+          <span>Activity Hash</span>
           <span>↓</span>
           <span>MST Blockchain</span>
           <span>↓</span>
           <span>Verification</span>
         </div>
-        <p className="muted">Detailed robot telemetry remains off-chain. Its cryptographic hash is anchored to MST Testnet, so if session data changes, verification fails.</p>
         <div className="audit-input-row">
-          <input value={activityHash} onChange={(e) => setActivityHash(e.target.value)} placeholder="Pet robot session payload" />
-          <button className="primary" onClick={() => handleVerify(orderSearch || verifyOrderId, "activity")}>Check hash</button>
+          <input aria-label="Order ID" value={orderSearch} onChange={(e) => setOrderSearch(e.target.value)} placeholder="Order ID" />
+          <button className="primary" onClick={() => void loadActivityAudit(orderSearch)} disabled={auditResult.status === "LOADING"}>
+            {auditResult.status === "LOADING" ? "Loading…" : "Load Audit"}
+          </button>
         </div>
+        {auditResult.status === "IDLE" && <p className="muted">Enter an Order ID to inspect its on-chain session audit state.</p>}
+        {auditResult.status === "LOADING" && <div className="loading-block">Reading rental and activity hash from MST Testnet…</div>}
+        {auditResult.status === "NOT_FOUND" && <div className="verification-box glass-subcard"><strong>Rental Not Found</strong><p>No robot session can be associated with this Order ID.</p></div>}
+        {auditResult.status === "ERROR" && <div className="verification-box glass-subcard error-banner"><strong>Audit unavailable</strong><p>{auditResult.message}</p></div>}
+        {(auditResult.status === "PENDING" || auditResult.status === "ANCHORED") && (() => {
+          const rental = auditResult.rental;
+          const anchored = auditResult.status === "ANCHORED";
+          return (
+            <div className="verification-box glass-subcard">
+              <div className="verification-badge">{rental.completed ? "RENTAL COMPLETED" : rental.active ? "SESSION ACTIVE" : "RENTAL INACTIVE"}</div>
+              <h3>{anchored ? "ACTIVITY HASH ANCHORED" : rental.completed ? "NOT ANCHORED" : "AWAITING ACTIVITY HASH"}</h3>
+              <div className="meta-grid">
+                <div><label>Order ID</label><strong>{rental.orderId}</strong></div>
+                <div><label>Robot</label><strong>{rental.robotId}</strong></div>
+                <div><label>Session status</label><strong>{formatRentalStatus(rental.active, rental.completed)}</strong></div>
+                <div><label>Session start</label><strong>{new Date(Number(rental.startTime) * 1000).toLocaleString()}</strong></div>
+                <div><label>Expected end</label><strong>{new Date(Number(rental.endTime) * 1000).toLocaleString()}</strong></div>
+              </div>
+              {anchored ? (
+                <>
+                  <p className="mono">On-chain activity hash: {rental.activityHash}</p>
+                  <p className="muted">Off-chain session data is currently unavailable for recomputation. Verification pending; no match or mismatch is claimed.</p>
+                </>
+              ) : (
+                <p className="muted">{rental.completed ? "This rental completed, but no robot activity hash was anchored for the session." : "The robot session is currently active. The cryptographic activity record has not yet been anchored."}</p>
+              )}
+              <a href={CONTRACT_SCAN_URL} target="_blank" rel="noreferrer">View Contract on MSTScan</a>
+            </div>
+          );
+        })()}
       </section>
     </div>
   );
-
-  const renderAdmin = () => {
-    const ownerMatch = adminOwner && address && adminOwner.toLowerCase() === address.toLowerCase();
-
-    if (!isConnected || !ownerMatch) {
-      return (
-        <div className="page-shell">
-          <section className="glass-card access-panel">
-            <h2>Admin access required</h2>
-            <p className="muted">This dashboard is only visible to the RoboPay contract owner.</p>
-          </section>
-        </div>
-      );
-    }
-
-    return (
-      <div className="page-shell">
-        <section className="glass-card admin-overview">
-          <h2>Robot Operator Dashboard</h2>
-          <div className="meta-grid">
-            <div><label>Contract owner</label><strong>{shortenAddress(adminOwner ?? undefined)}</strong></div>
-            <div><label>Contract address</label><strong>{shortenAddress(ROBO_PAY_ADDRESS)}</strong></div>
-            <div><label>Network</label><strong>MST Testnet</strong></div>
-            <div><label>Contract balance</label><strong>{contractBalance ? formatEther(contractBalance) : "—"} tMSTC</strong></div>
-          </div>
-        </section>
-
-        <section className="glass-card list-card">
-          <h3>Robot availability</h3>
-          <table className="history-table">
-            <thead>
-              <tr>
-                <th>Robot ID</th>
-                <th>Name</th>
-                <th>Service</th>
-                <th>Owner</th>
-                <th>Availability</th>
-                <th>Controls</th>
-              </tr>
-            </thead>
-            <tbody>
-              {robots.map((robot) => (
-                <tr key={robot.id}>
-                  <td>{robot.id}</td>
-                  <td>{robot.name}</td>
-                  <td>{robot.service}</td>
-                  <td>{shortenAddress(robot.owner)}</td>
-                  <td>{formatRobotStatus(robot.status)}</td>
-                  <td>
-                    <button className="secondary compact" onClick={() => setRobotStatus(robot.id, 0)}>Mark Available</button>
-                    <button className="secondary compact" onClick={() => setRobotStatus(robot.id, 1)}>Mark In Use</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-
-        <section className="glass-card admin-actions">
-          <h3>Activity hash recording</h3>
-          <div className="verify-input-row">
-            <input value={orderSearch} onChange={(e) => setOrderSearch(e.target.value)} placeholder="Order ID" />
-            <input value={newActivityHash} onChange={(e) => setNewActivityHash(e.target.value)} placeholder="Activity hash" />
-            <button className="primary" onClick={recordActivityHash}>Record Activity Hash</button>
-          </div>
-          {activityHashTx ? <p className="muted">Transaction: <a href={getMstscanTxUrl(activityHashTx)} target="_blank" rel="noreferrer">{shortenAddress(activityHashTx)}</a></p> : null}
-        </section>
-
-        <section className="glass-card admin-actions">
-          <h3>Withdrawal</h3>
-          <div className="verify-input-row">
-            <strong>{contractBalance ? `${formatEther(contractBalance)} tMSTC` : "0 tMSTC"}</strong>
-            <button className="primary" onClick={withdrawBalance}>Withdraw</button>
-          </div>
-        </section>
-      </div>
-    );
-  };
 
   const renderBlockchain = () => (
     <div className="page-shell">
@@ -1461,7 +1612,6 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
     if (activeTab === "history") return renderHistory();
     if (activeTab === "verify") return renderVerify();
     if (activeTab === "audit") return renderAudit();
-    if (activeTab === "admin") return renderAdmin();
     if (activeTab === "blockchain") return renderBlockchain();
     return renderHome();
   };
@@ -1491,9 +1641,6 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
               {label}
             </button>
           ))}
-          {adminOwner && address && adminOwner.toLowerCase() === address.toLowerCase() ? (
-            <button className={activeTab === "admin" ? "nav-item active" : "nav-item"} onClick={() => setActiveTab("admin")}>Admin</button>
-          ) : null}
         </nav>
 
         <div className="wallet-rail">
@@ -1516,7 +1663,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
 
       {toast ? <div className={`toast toast-${toast.type}`}>{toast.text}</div> : null}
 
-      {(!walletConnected || !isMstTestnet) && activeTab !== "home" ? (
+      {walletRequiredPage && (!walletConnected || !isMstTestnet) ? (
         <div className="network-banner">
           {!walletConnected
             ? "Connect BridgeKey to access live RoboPay blockchain data."
@@ -1532,7 +1679,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         <div className="loading-overlay">Waiting for BridgeKey transaction approval…</div>
       ) : null}
 
-      {!walletConnected && activeTab !== "home" ? <div className="page-shell"><section className="glass-card access-panel"><h2>BridgeKey is required</h2><p className="muted">Connect your wallet to browse available robots and authorize a rental.</p></section></div> : null}
+      {walletRequiredPage && !walletConnected ? <div className="page-shell"><section className="glass-card access-panel"><h2>BridgeKey is required</h2><p className="muted">Connect your wallet to browse your rentals and authorize a rental.</p></section></div> : null}
 
       {renderTabContent()}
     </div>
