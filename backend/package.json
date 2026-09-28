@@ -1,0 +1,1045 @@
+* {
+    box-sizing: border-box;
+}
+
+html {
+    scroll-behavior: smooth;
+}
+
+body {
+    margin: 0;
+    background:
+        radial-gradient(
+            circle at top right,
+            rgba(95, 180, 150, 0.10),
+            transparent 35%
+        ),
+        #07110e;
+    color: #edf8f3;
+    font-family:
+        Arial,
+        Helvetica,
+        sans-serif;
+}
+
+button,
+input,
+select {
+    font: inherit;
+}
+
+button {
+    cursor: pointer;
+}
+
+button:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+a {
+    color: inherit;
+}
+
+.page {
+    min-height: 100vh;
+}
+
+.navbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+
+    padding: 18px 7vw;
+
+    border-bottom:
+        1px solid
+        rgba(255, 255, 255, 0.08);
+
+    background:
+        rgba(7, 17, 14, 0.90);
+
+    backdrop-filter: blur(18px);
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.brandMark {
+    width: 44px;
+    height: 44px;
+
+    display: grid;
+    place-items: center;
+
+    border-radius: 14px;
+
+    background:
+        rgba(127, 224, 181, 0.12);
+
+    border:
+        1px solid
+        rgba(127, 224, 181, 0.22);
+}
+
+.brandTitle {
+    font-size: 19px;
+    font-weight: 800;
+}
+
+.brandSub {
+    margin-top: 2px;
+
+    color: #8fa8a0;
+
+    font-size: 12px;
+}
+
+.navbarRight {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.networkPill {
+    padding: 9px 14px;
+
+    border-radius: 999px;
+
+    background:
+        rgba(127, 224, 181, 0.08);
+
+    border:
+        1px solid
+        rgba(127, 224, 181, 0.18);
+
+    color: #9de8c5;
+
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.walletButton {
+    border: 0;
+
+    padding: 11px 16px;
+
+    border-radius: 12px;
+
+    background: #9ce5c1;
+
+    color: #07110e;
+
+    font-weight: 800;
+}
+
+.hero {
+    max-width: 1200px;
+
+    margin: 0 auto;
+
+    padding:
+        90px 7vw 65px;
+
+    display: grid;
+
+    grid-template-columns:
+        1.2fr 0.8fr;
+
+    gap: 70px;
+
+    align-items: center;
+}
+
+.heroContent h1 {
+    margin: 16px 0 20px;
+
+    max-width: 760px;
+
+    font-size:
+        clamp(
+            48px,
+            7vw,
+            88px
+        );
+
+    line-height: 0.98;
+
+    letter-spacing: -0.05em;
+}
+
+.heroContent p {
+    max-width: 650px;
+
+    color: #9aada6;
+
+    font-size: 18px;
+    line-height: 1.7;
+}
+
+.eyebrow,
+.sectionEyebrow {
+    color: #82ddb2;
+
+    font-size: 11px;
+
+    font-weight: 900;
+
+    letter-spacing: 0.18em;
+}
+
+.heroActions {
+    margin-top: 30px;
+
+    display: flex;
+    align-items: center;
+    gap: 20px;
+
+    flex-wrap: wrap;
+}
+
+.primaryButton,
+.secondaryButton {
+    border: 0;
+
+    border-radius: 12px;
+
+    padding: 13px 18px;
+
+    font-weight: 800;
+}
+
+.primaryButton {
+    background: #9ce5c1;
+
+    color: #07110e;
+}
+
+.primaryButton.full {
+    width: 100%;
+}
+
+.secondaryButton {
+    background:
+        rgba(255, 255, 255, 0.06);
+
+    color: #eaf6f1;
+
+    border:
+        1px solid
+        rgba(255, 255, 255, 0.09);
+}
+
+.heroTrust {
+    color: #8fa8a0;
+
+    font-size: 13px;
+}
+
+.heroCard {
+    padding: 30px;
+
+    border-radius: 24px;
+
+    background:
+        linear-gradient(
+            145deg,
+            rgba(255, 255, 255, 0.07),
+            rgba(255, 255, 255, 0.025)
+        );
+
+    border:
+        1px solid
+        rgba(255, 255, 255, 0.08);
+
+    box-shadow:
+        0 25px 80px
+        rgba(0, 0, 0, 0.20);
+}
+
+.heroCardLabel,
+.smallLabel {
+    color: #819a91;
+
+    font-size: 11px;
+
+    font-weight: 900;
+
+    letter-spacing: 0.14em;
+}
+
+.heroCardValue {
+    margin: 12px 0 24px;
+
+    color: #9ce5c1;
+
+    font-size: 38px;
+
+    font-weight: 900;
+}
+
+.heroCardGrid {
+    display: grid;
+
+    grid-template-columns:
+        1fr 1fr;
+
+    gap: 15px;
+}
+
+.heroCardGrid div {
+    padding: 16px;
+
+    border-radius: 14px;
+
+    background:
+        rgba(255, 255, 255, 0.04);
+}
+
+.heroCardGrid span {
+    display: block;
+
+    margin-bottom: 5px;
+
+    color: #80958e;
+
+    font-size: 11px;
+}
+
+.heroCardGrid strong {
+    font-size: 14px;
+}
+
+.section {
+    max-width: 1200px;
+
+    margin: 0 auto;
+
+    padding:
+        60px 7vw;
+}
+
+.sectionHeader {
+    display: flex;
+
+    align-items: end;
+
+    justify-content: space-between;
+
+    gap: 25px;
+
+    margin-bottom: 28px;
+}
+
+.sectionHeader h2,
+.howSection h2 {
+    margin:
+        8px 0 8px;
+
+    font-size: 42px;
+
+    letter-spacing:
+        -0.03em;
+}
+
+.sectionHeader p {
+    margin: 0;
+
+    color: #91a59f;
+}
+
+.availableBox {
+    display: flex;
+
+    align-items: baseline;
+
+    gap: 8px;
+}
+
+.availableBox strong {
+    color: #9ce5c1;
+
+    font-size: 42px;
+}
+
+.availableBox span {
+    color: #91a59f;
+
+    font-size: 13px;
+}
+
+.robotGrid {
+    display: grid;
+
+    grid-template-columns:
+        repeat(
+            3,
+            1fr
+        );
+
+    gap: 18px;
+}
+
+.robotCard {
+    padding: 24px;
+
+    border-radius: 22px;
+
+    background:
+        rgba(255, 255, 255, 0.035);
+
+    border:
+        1px solid
+        rgba(255, 255, 255, 0.07);
+
+    transition:
+        transform 0.2s ease,
+        border-color 0.2s ease;
+}
+
+.robotCard:hover,
+.robotCard.selected {
+    transform: translateY(-3px);
+
+    border-color:
+        rgba(127, 224, 181, 0.32);
+}
+
+.robotTop,
+.robotFooter {
+    display: flex;
+
+    align-items: center;
+
+    justify-content: space-between;
+}
+
+.robotEmoji {
+    width: 48px;
+    height: 48px;
+
+    display: grid;
+    place-items: center;
+
+    border-radius: 15px;
+
+    background:
+        rgba(127, 224, 181, 0.08);
+}
+
+.status {
+    padding: 7px 10px;
+
+    border-radius: 999px;
+
+    font-size: 10px;
+
+    font-weight: 900;
+
+    letter-spacing: 0.08em;
+}
+
+.status.available {
+    background:
+        rgba(127, 224, 181, 0.10);
+
+    color: #9ce5c1;
+}
+
+.status.busy {
+    background:
+        rgba(235, 130, 110, 0.10);
+
+    color: #efa59a;
+}
+
+.robotId {
+    margin-top: 22px;
+
+    color: #6f887f;
+
+    font-size: 11px;
+
+    font-weight: 900;
+
+    letter-spacing: 0.15em;
+}
+
+.robotCard h3 {
+    margin:
+        8px 0 6px;
+
+    font-size: 23px;
+}
+
+.robotService {
+    color: #9aaba4;
+
+    font-size: 13px;
+}
+
+.robotFooter {
+    margin-top: 28px;
+}
+
+.robotFooter strong {
+    font-size: 24px;
+}
+
+.robotFooter span {
+    margin-left: 5px;
+
+    color: #71867e;
+
+    font-size: 12px;
+}
+
+.bookingSection,
+.statusSection,
+.messageSection {
+    max-width: 1000px;
+
+    margin: 0 auto;
+
+    padding:
+        20px 7vw 30px;
+}
+
+.bookingCard,
+.statusCard {
+    padding: 30px;
+
+    border-radius: 24px;
+
+    background:
+        rgba(255, 255, 255, 0.035);
+
+    border:
+        1px solid
+        rgba(255, 255, 255, 0.08);
+}
+
+.bookingTop,
+.statusHeader {
+    display: flex;
+
+    align-items: start;
+
+    justify-content: space-between;
+}
+
+.bookingTop h2,
+.statusHeader h2 {
+    margin: 7px 0 5px;
+
+    font-size: 30px;
+}
+
+.bookingTop p {
+    margin: 0;
+
+    color: #91a59f;
+}
+
+.closeButton {
+    width: 38px;
+    height: 38px;
+
+    border: 0;
+
+    border-radius: 10px;
+
+    background:
+        rgba(255, 255, 255, 0.06);
+
+    color: white;
+}
+
+.durationRow {
+    margin:
+        25px 0;
+
+    display: flex;
+
+    gap: 10px;
+}
+
+.durationButton {
+    padding: 11px 17px;
+
+    border-radius: 10px;
+
+    background:
+        rgba(255, 255, 255, 0.05);
+
+    border:
+        1px solid
+        rgba(255, 255, 255, 0.09);
+
+    color: #dbe9e4;
+}
+
+.durationButton.active {
+    background: #9ce5c1;
+
+    color: #07110e;
+
+    border-color: #9ce5c1;
+
+    font-weight: 900;
+}
+
+.priceSummary {
+    margin-bottom: 22px;
+
+    padding: 17px;
+
+    border-radius: 15px;
+
+    background:
+        rgba(255, 255, 255, 0.03);
+}
+
+.priceSummary div {
+    display: flex;
+
+    justify-content: space-between;
+
+    padding: 7px 0;
+}
+
+.priceSummary span {
+    color: #82978f;
+}
+
+.detailsGrid {
+    display: grid;
+
+    grid-template-columns:
+        repeat(
+            3,
+            1fr
+        );
+
+    gap: 10px;
+
+    margin:
+        24px 0;
+}
+
+.detailsGrid div {
+    padding: 14px;
+
+    border-radius: 13px;
+
+    background:
+        rgba(255, 255, 255, 0.03);
+}
+
+.detailsGrid span {
+    display: block;
+
+    margin-bottom: 5px;
+
+    color: #748980;
+
+    font-size: 11px;
+}
+
+.detailsGrid strong {
+    font-size: 14px;
+}
+
+.liveStatus {
+    padding: 8px 12px;
+
+    border-radius: 999px;
+
+    background:
+        rgba(127, 224, 181, 0.10);
+
+    color: #9ce5c1;
+
+    font-size: 11px;
+
+    font-weight: 900;
+
+    letter-spacing: 0.1em;
+}
+
+.paymentBox,
+.confirmedBox,
+.auditBox,
+.integrityBox,
+.timerBox,
+.txBox {
+    margin-top: 20px;
+
+    padding: 22px;
+
+    border-radius: 18px;
+
+    background:
+        rgba(255, 255, 255, 0.035);
+
+    border:
+        1px solid
+        rgba(255, 255, 255, 0.07);
+}
+
+.paymentBox h3,
+.confirmedBox h3 {
+    margin:
+        8px 0 6px;
+
+    font-size: 22px;
+}
+
+.paymentBox p,
+.auditBox p {
+    color: #95a9a2;
+
+    line-height: 1.6;
+}
+
+.cryptoAmount {
+    margin:
+        18px 0;
+
+    color: #9ce5c1;
+
+    font-size: 30px;
+
+    font-weight: 900;
+}
+
+.confirmedBox {
+    text-align: center;
+}
+
+.confirmedIcon {
+    width: 52px;
+    height: 52px;
+
+    display: grid;
+    place-items: center;
+
+    margin:
+        0 auto 14px;
+
+    border-radius: 50%;
+
+    background:
+        rgba(127, 224, 181, 0.12);
+
+    color: #9ce5c1;
+
+    font-size: 25px;
+
+    font-weight: 900;
+}
+
+.confirmedBox p {
+    margin:
+        4px 0;
+
+    color: #93a79f;
+}
+
+.verifiedText {
+    margin-top: 12px;
+
+    color: #9ce5c1;
+
+    font-size: 13px;
+
+    font-weight: 800;
+}
+
+.txBox {
+    text-align: left;
+}
+
+.hash {
+    margin:
+        9px 0;
+
+    word-break: break-all;
+
+    color: #c9dad4;
+
+    font-size: 12px;
+
+    line-height: 1.5;
+}
+
+.txBox a {
+    color: #9ce5c1;
+
+    font-size: 13px;
+
+    font-weight: 800;
+}
+
+.timer {
+    margin:
+        8px 0;
+
+    font-size: 48px;
+
+    font-weight: 900;
+
+    letter-spacing: -0.04em;
+}
+
+.timerCaption {
+    margin-bottom: 15px;
+
+    color: #81958d;
+
+    font-size: 12px;
+}
+
+.auditButtons {
+    display: flex;
+
+    gap: 10px;
+
+    flex-wrap: wrap;
+
+    margin-top: 14px;
+}
+
+.integrityBox {
+    text-align: left;
+}
+
+.integrityRow {
+    display: flex;
+
+    align-items: center;
+
+    justify-content: space-between;
+
+    gap: 20px;
+
+    padding: 13px 0;
+
+    border-bottom:
+        1px solid
+        rgba(255, 255, 255, 0.06);
+}
+
+.integrityRow:last-child {
+    border-bottom: 0;
+}
+
+.pass {
+    color: #9ce5c1;
+}
+
+.fail {
+    color: #ef9d90;
+}
+
+.pending {
+    color: #a3b3ae;
+}
+
+.errorMessage,
+.successMessage {
+    padding: 15px 18px;
+
+    border-radius: 14px;
+
+    text-align: center;
+
+    font-weight: 700;
+}
+
+.errorMessage {
+    background:
+        rgba(230, 90, 75, 0.10);
+
+    color: #efaaa0;
+
+    border:
+        1px solid
+        rgba(230, 90, 75, 0.15);
+}
+
+.successMessage {
+    background:
+        rgba(127, 224, 181, 0.08);
+
+    color: #9ce5c1;
+
+    border:
+        1px solid
+        rgba(127, 224, 181, 0.14);
+}
+
+.howSection {
+    max-width: 1200px;
+
+    margin: 0 auto;
+
+    padding:
+        90px 7vw;
+}
+
+.featureGrid {
+    display: grid;
+
+    grid-template-columns:
+        repeat(
+            4,
+            1fr
+        );
+
+    gap: 15px;
+
+    margin-top: 30px;
+}
+
+.featureCard {
+    padding: 23px;
+
+    border-radius: 20px;
+
+    background:
+        rgba(255, 255, 255, 0.03);
+
+    border:
+        1px solid
+        rgba(255, 255, 255, 0.07);
+}
+
+.featureCard > div {
+    color: #6f887f;
+
+    font-size: 12px;
+
+    font-weight: 900;
+
+    letter-spacing: 0.12em;
+}
+
+.featureCard h3 {
+    margin:
+        18px 0 8px;
+
+    font-size: 18px;
+}
+
+.featureCard p {
+    margin: 0;
+
+    color: #849890;
+
+    font-size: 13px;
+
+    line-height: 1.6;
+}
+
+.footer {
+    max-width: 1200px;
+
+    margin: 0 auto;
+
+    padding:
+        35px 7vw 50px;
+
+    display: flex;
+
+    justify-content: space-between;
+
+    gap: 20px;
+
+    color: #728880;
+
+    font-size: 13px;
+
+    border-top:
+        1px solid
+        rgba(255, 255, 255, 0.07);
+}
+
+@media (
+    max-width: 900px
+) {
+
+    .hero {
+        grid-template-columns:
+            1fr;
+    }
+
+    .robotGrid {
+        grid-template-columns:
+            1fr;
+    }
+
+    .featureGrid {
+        grid-template-columns:
+            1fr 1fr;
+    }
+
+    .detailsGrid {
+        grid-template-columns:
+            1fr 1fr;
+    }
+
+}
+
+@media (
+    max-width: 650px
+) {
+
+    .navbar {
+        padding:
+            14px 5vw;
+    }
+
+    .networkPill {
+        display: none;
+    }
+
+    .hero {
+        padding:
+            65px 5vw 40px;
+    }
+
+    .section,
+    .howSection {
+        padding-left: 5vw;
+        padding-right: 5vw;
+    }
+
+    .featureGrid,
+    .detailsGrid,
+    .heroCardGrid {
+        grid-template-columns:
+            1fr;
+    }
+
+    .sectionHeader {
+        align-items: start;
+
+        flex-direction: column;
+    }
+
+    .footer {
+        padding:
+            30px 5vw 40px;
+
+        flex-direction: column;
+    }
+
+}
