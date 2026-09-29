@@ -1,4 +1,4 @@
-import { keccak256, encodePacked, type Address } from "viem";
+import { keccak256, encodeAbiParameters, type Address } from "viem";
 import { formatEther, formatUnits } from "viem";
 import { ROBO_PAY_ADDRESS } from "@/lib/contract";
 
@@ -31,10 +31,11 @@ export function formatRobotStatus(status: number | bigint) {
   return "UNKNOWN";
 }
 
-export function formatRentalStatus(active: boolean, completed: boolean) {
-  if (completed) return "COMPLETED";
-  if (active) return "ACTIVE";
-  return "PENDING";
+export function formatRentalStatus(status: number | bigint) {
+  if (Number(status) === 0) return "ACTIVE / ESCROWED";
+  if (Number(status) === 1) return "COMPLETED / SETTLED";
+  if (Number(status) === 2) return "REFUNDED";
+  return "UNKNOWN";
 }
 
 export function getNativeBalanceLabel(balance?: bigint) {
@@ -53,8 +54,17 @@ export function computeRentalDataHash(
   endTime: bigint,
 ) {
   return keccak256(
-    encodePacked(
-      ["string", "string", "string", "uint256", "uint256", "address", "uint256", "uint256"],
+    encodeAbiParameters(
+      [
+        { type: "string" },
+        { type: "string" },
+        { type: "string" },
+        { type: "uint256" },
+        { type: "uint256" },
+        { type: "address" },
+        { type: "uint256" },
+        { type: "uint256" },
+      ],
       [orderId, robotId, service, BigInt(durationMinutes), amountInr, customer, startTime, endTime],
     ),
   );

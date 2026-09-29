@@ -1,25 +1,14 @@
 import { z } from "zod";
-const orderIdParam = z.object({ orderId: z.string().min(1) });
+const orderIdParam = z.object({ orderId: z.string().min(1).max(128) });
 export async function auditRoutes(app) {
     app.get("/audit/:orderId", async (request) => {
         const { orderId } = orderIdParam.parse(request.params);
-        return {
-            success: true,
-            data: {
-                orderId,
-                events: [],
-                summary: { totalEvents: 0, anchoredEvents: 0 },
-            },
-        };
+        const { auditService } = await import("../services/audit.service.js");
+        return { success: true, data: await auditService.getAudit(orderId) };
     });
     app.get("/audit/:orderId/history", async (request) => {
         const { orderId } = orderIdParam.parse(request.params);
-        return {
-            success: true,
-            data: {
-                orderId,
-                history: [],
-            },
-        };
+        const { auditService } = await import("../services/audit.service.js");
+        return { success: true, data: await auditService.getAuditHistory(orderId) };
     });
 }

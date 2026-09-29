@@ -1,26 +1,45 @@
-import { type Abi } from "viem";
+import { type Abi, type Address } from "viem";
 import { deployments } from "robopay-mst-shared";
 import { mstTestnet } from "@/lib/chains";
 
-export const ROBO_PAY_ADDRESS = ((deployments as Record<string, any>).testnet?.RoboPay?.address ?? "0xe4CA28050580918c252b53c181ff361B65C9f667") as `0x${string}`;
-export const ROBO_PAY_ABI: Abi = ((deployments as Record<string, any>).testnet?.RoboPay?.abi ?? []) as Abi;
+type DeploymentRecord = { address: Address; abi: Abi };
+const testnetDeployments = deployments.testnet as Record<string, DeploymentRecord | undefined>;
+const escrowDeployment = testnetDeployments.RoboPayEscrow;
+
+export const IS_ROBO_PAY_ESCROW_DEPLOYED = Boolean(escrowDeployment);
+export const ROBO_PAY_ADDRESS = escrowDeployment?.address ?? "0x0000000000000000000000000000000000000000";
+export const ROBO_PAY_ABI: Abi = escrowDeployment?.abi ?? [];
 export const MST_CHAIN_ID = mstTestnet.id;
 export const CONTRACT_SCAN_URL = `https://testnet.mstscan.com/address/${ROBO_PAY_ADDRESS}`;
 
 export const ROBOT_PACKAGES: Record<string, Array<{ durationMinutes: number; amountInr: number; amountWei: bigint }>> = {
   "RF-01": [
-    { durationMinutes: 10, amountInr: 20, amountWei: BigInt(0) },
-    { durationMinutes: 20, amountInr: 40, amountWei: BigInt(0) },
-    { durationMinutes: 30, amountInr: 60, amountWei: BigInt(0) },
+    { durationMinutes: 1, amountInr: 2, amountWei: BigInt(0) },
+    { durationMinutes: 2, amountInr: 4, amountWei: BigInt(0) },
+    { durationMinutes: 3, amountInr: 6, amountWei: BigInt(0) },
   ],
-  "FC-01": [{ durationMinutes: 10, amountInr: 20, amountWei: BigInt(0) }],
-  "ST-01": [{ durationMinutes: 30, amountInr: 30, amountWei: BigInt(0) }],
+  "FC-01": [
+    { durationMinutes: 1, amountInr: 2, amountWei: BigInt(0) },
+    { durationMinutes: 2, amountInr: 4, amountWei: BigInt(0) },
+    { durationMinutes: 3, amountInr: 6, amountWei: BigInt(0) },
+  ],
+  "ST-01": [
+    { durationMinutes: 1, amountInr: 2, amountWei: BigInt(0) },
+    { durationMinutes: 2, amountInr: 4, amountWei: BigInt(0) },
+    { durationMinutes: 3, amountInr: 6, amountWei: BigInt(0) },
+  ],
+  "RC-01": [
+    { durationMinutes: 1, amountInr: 2, amountWei: BigInt(0) },
+    { durationMinutes: 2, amountInr: 4, amountWei: BigInt(0) },
+    { durationMinutes: 3, amountInr: 6, amountWei: BigInt(0) },
+  ],
 };
 
 export const defaultRobots = [
   { id: "RF-01", name: "RoboFollow", service: "Human Following" },
   { id: "FC-01", name: "RoboClean", service: "Floor Cleaning" },
   { id: "ST-01", name: "RoboTrolley", service: "Smart Shopping Trolley" },
+  { id: "RC-01", name: "RoboCourier", service: "Autonomous Parcel Delivery" },
 ] as const;
 
 export function getRobotConfig(robotId: string) {

@@ -12,9 +12,7 @@
     "compile": "turbo run compile",
     "lint": "turbo run lint",
     "deploy:testnet": "turbo run deploy:testnet",
-    "deploy:mainnet": "turbo run deploy:mainnet",
     "verify:testnet": "turbo run verify:testnet",
-    "verify:mainnet": "turbo run verify:mainnet",
     "clean": "turbo run clean"
   },
   "devDependencies": {

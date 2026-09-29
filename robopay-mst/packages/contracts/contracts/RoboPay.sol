@@ -177,16 +177,16 @@ contract RoboPay is Ownable {
             idHash ==
             keccak256(abi.encodePacked("RF-01"))
         ) {
-            if (durationMinutes == 10) {
-                return 20;
+            if (durationMinutes == 1) {
+                return 2;
             }
 
-            if (durationMinutes == 20) {
-                return 40;
+            if (durationMinutes == 2) {
+                return 4;
             }
 
-            if (durationMinutes == 30) {
-                return 60;
+            if (durationMinutes == 3) {
+                return 6;
             }
         }
 
@@ -195,8 +195,16 @@ contract RoboPay is Ownable {
             idHash ==
             keccak256(abi.encodePacked("FC-01"))
         ) {
-            if (durationMinutes == 10) {
-                return 20;
+            if (durationMinutes == 1) {
+                return 2;
+            }
+
+            if (durationMinutes == 2) {
+                return 4;
+            }
+
+            if (durationMinutes == 3) {
+                return 6;
             }
         }
 
@@ -205,8 +213,16 @@ contract RoboPay is Ownable {
             idHash ==
             keccak256(abi.encodePacked("ST-01"))
         ) {
-            if (durationMinutes == 30) {
-                return 30;
+            if (durationMinutes == 1) {
+                return 2;
+            }
+
+            if (durationMinutes == 2) {
+                return 4;
+            }
+
+            if (durationMinutes == 3) {
+                return 6;
             }
         }
 
@@ -233,16 +249,16 @@ contract RoboPay is Ownable {
             idHash ==
             keccak256(abi.encodePacked("RF-01"))
         ) {
-            if (durationMinutes == 10) {
-                return 0.01 ether;
+            if (durationMinutes == 1) {
+                return 0.001 ether;
             }
 
-            if (durationMinutes == 20) {
-                return 0.02 ether;
+            if (durationMinutes == 2) {
+                return 0.002 ether;
             }
 
-            if (durationMinutes == 30) {
-                return 0.03 ether;
+            if (durationMinutes == 3) {
+                return 0.003 ether;
             }
         }
 
@@ -251,8 +267,16 @@ contract RoboPay is Ownable {
             idHash ==
             keccak256(abi.encodePacked("FC-01"))
         ) {
-            if (durationMinutes == 10) {
-                return 0.01 ether;
+            if (durationMinutes == 1) {
+                return 0.001 ether;
+            }
+
+            if (durationMinutes == 2) {
+                return 0.002 ether;
+            }
+
+            if (durationMinutes == 3) {
+                return 0.003 ether;
             }
         }
 
@@ -261,8 +285,16 @@ contract RoboPay is Ownable {
             idHash ==
             keccak256(abi.encodePacked("ST-01"))
         ) {
-            if (durationMinutes == 30) {
-                return 0.015 ether;
+            if (durationMinutes == 1) {
+                return 0.001 ether;
+            }
+
+            if (durationMinutes == 2) {
+                return 0.002 ether;
+            }
+
+            if (durationMinutes == 3) {
+                return 0.003 ether;
             }
         }
 

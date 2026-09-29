@@ -16,4 +16,8 @@ export async function robotRoutes(app) {
         const status = await robotService.getRobotStatus(robotId);
         return { success: true, data: status };
     });
+    app.get("/robots/:robotId/active-rental", async (request) => {
+        const { robotId } = robotIdParam.parse(request.params);
+        return { success: true, data: await robotService.getActiveRental(robotId) };
+    });
 }

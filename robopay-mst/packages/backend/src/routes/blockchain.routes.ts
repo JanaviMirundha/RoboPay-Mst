@@ -1,7 +1,4 @@
 import type { FastifyInstance } from "fastify";
-import { z } from "zod";
-
-import { env } from "../config/env.js";
 import { blockchainService } from "../services/blockchain.service.js";
 
 export async function blockchainRoutes(app: FastifyInstance) {
@@ -13,15 +10,21 @@ export async function blockchainRoutes(app: FastifyInstance) {
   app.get("/blockchain/status", async () => {
     const blockNumber = await blockchainService.getCurrentBlock();
     const contractBalance = await blockchainService.contractBalance();
-    const owner = await blockchainService.getOwner();
+    const owner = blockchainService.hasFunction("owner") ? await blockchainService.getOwner() : null;
     return {
       success: true,
       data: {
-        chainId: env.MST_CHAIN_ID,
-        contract: env.ROBO_PAY_CONTRACT_ADDRESS,
+        chainId: 91562037,
+        contract: blockchainService.address,
         blockNumber,
-        contractBalance,
+        contractBalanceWei: contractBalance,
         owner,
+        capabilities: {
+          settlement: blockchainService.hasFunction("settleRental"),
+          refund: blockchainService.hasFunction("refundRental"),
+          activityAnchor: blockchainService.hasFunction("recordActivityHash"),
+          rentalEnd: blockchainService.hasFunction("endRental"),
+        },
       },
     };
   });

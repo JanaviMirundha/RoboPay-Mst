@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   createWalletClient,
   custom,
@@ -8,13 +8,16 @@ import {
   formatEther,
   http,
   parseEther,
+  parseAbiItem,
+  parseEventLogs,
   type Address,
   type EIP1193Provider,
   type Hex,
 } from "viem";
 import { useAccount, useBalance, useConnect, useDisconnect, useSwitchChain } from "wagmi";
 import { mstTestnet } from "@/lib/chains";
-import { ROBO_PAY_ABI, ROBO_PAY_ADDRESS } from "@/lib/contract";
+import { IS_ROBO_PAY_ESCROW_DEPLOYED, ROBO_PAY_ABI, ROBO_PAY_ADDRESS } from "@/lib/contract";
+import { api, type ActiveRobotRentalResponse, type RentalOutcomeResponse } from "@/lib/api";
 import { CONTRACT_SCAN_URL, getMstscanTxUrl } from "@/lib/mstscan";
 import { shortenAddress, createOrderId, formatRobotStatus, formatRentalStatus, computeRentalDataHash } from "@/lib/blockchain";
 import type { Robot, RobotStatus, TransactionState } from "@/types";
@@ -41,13 +44,16 @@ type RentalVerificationState =
       rental: RentalDetail;
       dataHashMatches: boolean;
       robotStatus: RobotStatus | null;
+      paymentRecipient: Address | null;
+      activityVerification: Awaited<ReturnType<typeof api.verifyActivity>> | null;
+      outcome: RentalOutcomeResponse | null;
     };
 type ActivityAuditState =
   | { status: "IDLE" | "LOADING"; orderId: string }
   | { status: "NOT_FOUND"; orderId: string }
   | { status: "ERROR"; orderId: string; message: string }
-  | { status: "PENDING"; orderId: string; rental: RentalDetail }
-  | { status: "ANCHORED"; orderId: string; rental: RentalDetail };
+  | { status: "PENDING"; orderId: string; rental: RentalDetail; audit: Awaited<ReturnType<typeof api.audit>> | null; verification: Awaited<ReturnType<typeof api.verifyActivity>> | null; outcome: RentalOutcomeResponse | null }
+  | { status: "ANCHORED"; orderId: string; rental: RentalDetail; audit: Awaited<ReturnType<typeof api.audit>> | null; verification: Awaited<ReturnType<typeof api.verifyActivity>> | null; outcome: RentalOutcomeResponse | null };
 
 type RentalDetail = {
   orderId: string;
@@ -59,11 +65,48 @@ type RentalDetail = {
   customer: Address;
   startTime: bigint;
   endTime: bigint;
+  status: number;
   active: boolean;
   completed: boolean;
+  refunded: boolean;
   activityHash: string;
   rentalDataHash: string;
+  failureReasonHash: string;
+  settledAt: bigint;
+  settlementTxHash?: Hex;
+  refundTxHash?: Hex;
 };
+
+type RentalTuple = [string, string, string, bigint, bigint, bigint, Address, bigint, bigint, number, Hex, Hex, Hex, bigint];
+
+function rentalFromTuple(data: RentalTuple): RentalDetail {
+  const status = Number(data[9]);
+  return {
+    orderId: data[0],
+    robotId: data[1],
+    service: data[2],
+    durationMinutes: data[3],
+    amountInr: data[4],
+    amountPaidWei: data[5],
+    customer: data[6],
+    startTime: data[7],
+    endTime: data[8],
+    status,
+    active: status === 0,
+    completed: status === 1,
+    refunded: status === 2,
+    rentalDataHash: data[10],
+    activityHash: data[11],
+    failureReasonHash: data[12],
+    settledAt: data[13],
+  };
+}
+
+function getEventOrderId(args: Record<string, unknown> | readonly unknown[] | undefined) {
+  if (!args || Array.isArray(args)) return "—";
+  const orderId = (args as Record<string, unknown>).orderId;
+  return typeof orderId === "string" ? orderId : "—";
+}
 
 type ConfirmationState = {
   robotId: string;
@@ -80,6 +123,13 @@ type ContractMessage = {
   text: string;
 };
 
+type ContractEventRecord = {
+  name: string;
+  orderId: string;
+  blockNumber: bigint;
+  transactionHash: Hex;
+};
+
 type PackageLoadState = "INITIAL" | "WAITING_FOR_WALLET" | "WAITING_FOR_NETWORK" | "LOADING" | "SUCCESS" | "EMPTY" | "ERROR";
 type BridgeKeyEip1193Provider = EIP1193Provider & { isBridgeKey?: boolean };
 
@@ -89,9 +139,10 @@ const publicClient = createPublicClient({
 });
 
 const robotPricingMap: Record<string, number[]> = {
-  "RF-01": [10, 20, 30],
-  "FC-01": [10],
-  "ST-01": [30],
+  "RF-01": [1, 2, 3],
+  "FC-01": [1, 2, 3],
+  "ST-01": [1, 2, 3],
+  "RC-01": [1, 2, 3],
 };
 
 function usingAddress(address?: string) {
@@ -150,9 +201,13 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
   const [activeTab, setActiveTab] = useState<PageName>(initialTab);
   const [robots, setRobots] = useState<Robot[]>([]);
   const [rentals, setRentals] = useState<RentalDetail[]>([]);
+  const [activeRentalTimings, setActiveRentalTimings] = useState<Record<string, ActiveRobotRentalResponse["rental"]>>({});
+  const [contractEvents, setContractEvents] = useState<ContractEventRecord[]>([]);
+  const [isLoadingEvents, setIsLoadingEvents] = useState(false);
+  const [eventLoadError, setEventLoadError] = useState<string | null>(null);
   const [robotPrices, setRobotPrices] = useState<Record<string, Array<{ durationMinutes: number; amountInr: bigint; payment: bigint }>>>({});
   const [selectedRobotId, setSelectedRobotId] = useState("RF-01");
-  const [selectedDuration, setSelectedDuration] = useState(10);
+  const [selectedDuration, setSelectedDuration] = useState(1);
   const [currentOrderId, setCurrentOrderId] = useState(createOrderId);
   const [verifyOrderId, setVerifyOrderId] = useState("");
   const [verificationResult, setVerificationResult] = useState<RentalVerificationState>({ status: "IDLE", orderId: "" });
@@ -161,6 +216,8 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
   const [txHash, setTxHash] = useState<Hex | null>(null);
   const [lastRentalTx, setLastRentalTx] = useState<{ orderId: string; hash: Hex } | null>(null);
   const [txState, setTxState] = useState<TransactionState>("DISCONNECTED");
+  const [backendStatus, setBackendStatus] = useState<"healthy" | "degraded" | "unavailable" | "unknown">("unknown");
+  const [rentalExpiryState, setRentalExpiryState] = useState<Record<string, { state: "ACTIVE" | "VERIFYING_SESSION" | "SETTLING" | "SETTLEMENT_RETRY_PENDING" | "REFUNDING" | "REFUND_RETRY_PENDING" | "PENDING" | "COMPLETED" | "REFUNDED"; message?: string; txHash?: Hex; paymentStatus?: string; robotStatus?: string; adminAddress?: string; activityHash?: string; anchorTxHash?: string; failureReasonHash?: string; evidenceMode?: RentalOutcomeResponse["evidenceMode"] }>>({});
   const [toast, setToast] = useState<ContractMessage | null>(null);
   const [isLoadingRobots, setIsLoadingRobots] = useState(true);
   const [isLoadingRentals, setIsLoadingRentals] = useState(false);
@@ -170,11 +227,8 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
   const [orderSearch, setOrderSearch] = useState("");
   const [isSubmittingPayment, setIsSubmittingPayment] = useState(false);
   const [isTransactionLocked, setIsTransactionLocked] = useState(false);
-  const [completingOrders, setCompletingOrders] = useState<string[]>([]);
   const [currentTimeSeconds, setCurrentTimeSeconds] = useState(() => Math.floor(Date.now() / 1000));
   const transactionLock = useRef(false);
-  const expiryAttempts = useRef(new Map<string, number>());
-  const expiryInFlight = useRef(new Set<string>());
 
   const hasWalletAccount = isConnected && Boolean(address);
   const walletConnected = hasWalletAccount && Number.isSafeInteger(chainId);
@@ -210,6 +264,21 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
   }, [selectedRobotId, selectedDuration]);
 
   useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const health = await api.health();
+        if (active) setBackendStatus(health.status === "healthy" ? "healthy" : health.status === "degraded" ? "degraded" : "unavailable");
+      } catch {
+        if (active) setBackendStatus("unavailable");
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
     if (walletConnected && isMstTestnet) {
       window.sessionStorage.removeItem("robopay.bridgekey-provider-refresh-attempted");
     }
@@ -223,6 +292,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
   useEffect(() => {
     void refreshRobots();
     void refreshRentals();
+    void refreshContractEvents();
     const refreshAvailability = () => {
       if (document.visibilityState === "visible") {
         void refreshRobots();
@@ -240,6 +310,11 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
   }, []);
 
   const refreshRobots = async () => {
+    if (!IS_ROBO_PAY_ESCROW_DEPLOYED) {
+      setRobots([]);
+      setIsLoadingRobots(false);
+      return;
+    }
     setIsLoadingRobots(true);
     try {
       const ids = (await publicClient.readContract({
@@ -270,6 +345,17 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
 
       if (nextRobots.length > 0) {
         setRobots(nextRobots);
+        const inUseRobots = nextRobots.filter((robot) => robot.status === 1);
+        const timingEntries = await Promise.all(inUseRobots.map(async (robot) => {
+          try {
+            const result = await api.activeRobotRental(robot.id);
+            return [robot.id, result.rental] as const;
+          } catch (error) {
+            console.warn(`Active rental timing unavailable for ${robot.id}`, error);
+            return [robot.id, null] as const;
+          }
+        }));
+        setActiveRentalTimings(Object.fromEntries(timingEntries));
         if (!nextRobots.some((robot) => robot.id === selectedRobotId)) {
           setSelectedRobotId(nextRobots[0].id);
         }
@@ -283,6 +369,11 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
   };
 
   const refreshRentals = async () => {
+    if (!IS_ROBO_PAY_ESCROW_DEPLOYED) {
+      setRentals([]);
+      setIsLoadingRentals(false);
+      return;
+    }
     setIsLoadingRentals(true);
     try {
       const orderIds = (await publicClient.readContract({
@@ -298,23 +389,35 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
             abi: ROBO_PAY_ABI,
             functionName: "getRental",
             args: [orderId],
-          })) as [string, string, string, bigint, bigint, bigint, Address, bigint, bigint, boolean, boolean, Hex, Hex];
+          })) as RentalTuple;
 
-          return {
-            orderId: rentalData[0],
-            robotId: rentalData[1],
-            service: rentalData[2],
-            durationMinutes: rentalData[3],
-            amountInr: rentalData[4],
-            amountPaidWei: rentalData[5],
-            customer: rentalData[6],
-            startTime: rentalData[7],
-            endTime: rentalData[8],
-            active: rentalData[9],
-            completed: rentalData[10],
-            activityHash: rentalData[11],
-            rentalDataHash: rentalData[12],
-          } satisfies RentalDetail;
+          const rental = rentalFromTuple(rentalData);
+          if (rental.status === 1) {
+            try {
+              const logs = await publicClient.getLogs({
+                address: ROBO_PAY_ADDRESS,
+                event: parseAbiItem("event RentalSettled(string indexed orderId,string indexed robotId,address indexed recipient,uint256 amount,uint256 settledAt)"),
+                args: { orderId },
+                fromBlock: BigInt(0),
+              });
+              rental.settlementTxHash = logs.at(-1)?.transactionHash;
+            } catch (error) {
+              console.warn("Settlement event lookup unavailable; preserving on-chain rental state.", error);
+            }
+          } else if (rental.status === 2) {
+            try {
+              const logs = await publicClient.getLogs({
+                address: ROBO_PAY_ADDRESS,
+                event: parseAbiItem("event RentalRefunded(string indexed orderId,string indexed robotId,address indexed customer,uint256 amount,bytes32 failureReasonHash,bytes32 activityHash,uint256 refundedAt)"),
+                args: { orderId },
+                fromBlock: BigInt(0),
+              });
+              rental.refundTxHash = logs.at(-1)?.transactionHash;
+            } catch (error) {
+              console.warn("Refund event lookup unavailable; preserving on-chain rental state.", error);
+            }
+          }
+          return rental;
         })
       );
 
@@ -325,6 +428,52 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
       setToast({ type: "error", text: "Unable to read rental history from the contract." });
     } finally {
       setIsLoadingRentals(false);
+    }
+  };
+
+  const refreshContractEvents = async () => {
+    if (!IS_ROBO_PAY_ESCROW_DEPLOYED) {
+      setContractEvents([]);
+      setEventLoadError(null);
+      return;
+    }
+
+    setIsLoadingEvents(true);
+    setEventLoadError(null);
+    try {
+      const latestBlock = await publicClient.getBlockNumber();
+      const startBlock = latestBlock > BigInt(50_000) ? latestBlock - BigInt(50_000) : BigInt(0);
+      const logs = await publicClient.getLogs({
+        address: ROBO_PAY_ADDRESS,
+        fromBlock: startBlock,
+        toBlock: latestBlock,
+      });
+      const decodedLogs = parseEventLogs({ abi: ROBO_PAY_ABI, logs, strict: false });
+      const nextEvents = decodedLogs
+        .filter((log) => [
+          "RobotRegistered",
+          "RobotAvailabilityChanged",
+          "RentalCreated",
+          "ActivityHashRecorded",
+          "RentalSettled",
+          "RentalCompleted",
+          "RentalRefunded",
+        ].includes(log.eventName ?? ""))
+        .map((log) => ({
+          name: log.eventName ?? "ContractEvent",
+          orderId: getEventOrderId(log.args),
+          blockNumber: log.blockNumber ?? BigInt(0),
+          transactionHash: log.transactionHash,
+        }))
+        .sort((left, right) => (left.blockNumber > right.blockNumber ? -1 : left.blockNumber < right.blockNumber ? 1 : 0))
+        .slice(0, 25);
+      setContractEvents(nextEvents);
+    } catch (error) {
+      console.error("Unable to read RoboPay escrow contract events", error);
+      setContractEvents([]);
+      setEventLoadError("Unable to load escrow events from MST Testnet. Retry when the RPC is available.");
+    } finally {
+      setIsLoadingEvents(false);
     }
   };
 
@@ -344,6 +493,12 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
   }, [walletConnected, address, chainId, isMstTestnet, connectedAddress]);
 
   useEffect(() => {
+    if (!IS_ROBO_PAY_ESCROW_DEPLOYED) {
+      setPackageLoadState("ERROR");
+      setPackageLoadError("RoboPay escrow is not deployed to MST Testnet yet.");
+      setRobotPrices((current) => ({ ...current, [selectedRobotId]: [] }));
+      return;
+    }
     if (!selectedRobotId) {
       setPackageLoadState("INITIAL");
       setPackageLoadError(null);
@@ -370,7 +525,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
       setPackageLoadState("LOADING");
       setPackageLoadError(null);
 
-      const candidateDurations = [10, 20, 30];
+      const candidateDurations = [1, 2, 3];
       const nextPrices: Array<{ durationMinutes: number; amountInr: bigint; payment: bigint }> = [];
 
       for (const durationMinutes of candidateDurations) {
@@ -429,21 +584,32 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
   const customerRentals = connectedAddress
     ? rentals.filter((rental) => rental.customer.toLowerCase() === connectedAddress.toLowerCase())
     : [];
-  const activeRentals = customerRentals.filter((rental) => rental.active);
   const historyRentals = [...customerRentals].sort((a, b) => Number(b.startTime - a.startTime));
   const availableRobotCount = robots.filter((robot) => robot.status === 0 && robot.registered).length;
   const activeRentalCount = customerRentals.filter((rental) => rental.active).length;
   const completedRentalCount = customerRentals.filter((rental) => rental.completed).length;
+  const refundedRentalCount = customerRentals.filter((rental) => rental.refunded).length;
 
   const getRobotUsageMessage = (robotId: string) => {
     const activeRental = rentals.find((rental) => rental.robotId === robotId && rental.active);
-    if (!activeRental) return "Currently in use. Active rental timing is unavailable from current contract data.";
+    const backendRental = activeRentalTimings[robotId];
+    if (!activeRental && !backendRental) return "IN_USE on MST Testnet; matching active rental timing is currently unavailable.";
 
-    const endTimeSeconds = Number(activeRental.endTime);
+    const endTimeSeconds = activeRental ? Number(activeRental.endTime) : Number(backendRental?.endTime);
+    if (!Number.isFinite(endTimeSeconds)) return "IN_USE on MST Testnet; backend could not resolve a unique matching active rental.";
     const remainingSeconds = Math.max(endTimeSeconds - currentTimeSeconds, 0);
     const endTime = new Date(endTimeSeconds * 1000).toLocaleString();
     if (remainingSeconds === 0) {
-      return `Usage period ended at ${endTime}. The robot remains unavailable until endRental is confirmed on MST Testnet.`;
+      const orderId = activeRental?.orderId ?? backendRental?.orderId;
+      const finalization = orderId ? rentalExpiryState[orderId] : undefined;
+      if (finalization?.state === "SETTLING") return `Usage period ended at ${endTime}. Verified session success is settling escrow on MST Testnet; robot availability remains IN_USE until chain confirmation.`;
+      if (finalization?.state === "REFUNDING") return `Usage period ended at ${endTime}. Verified robot failure is refunding escrow on MST Testnet; robot availability remains IN_USE until chain confirmation.`;
+      if (finalization?.state === "SETTLEMENT_RETRY_PENDING") return `Usage period ended at ${endTime}. Settlement retry pending; payment remains escrowed and the robot remains IN_USE.`;
+      if (finalization?.state === "REFUND_RETRY_PENDING") return `Usage period ended at ${endTime}. Refund retry pending; payment remains escrowed and the robot remains IN_USE.`;
+      if (finalization?.state === "PENDING") return `Usage period ended at ${endTime}. Robot-session outcome is not yet verifiable; payment remains escrowed and the robot remains IN_USE.`;
+      if (finalization?.state === "COMPLETED") return `Usage period ended at ${endTime}. MST Testnet confirmed settlement; the robot is AVAILABLE.`;
+      if (finalization?.state === "REFUNDED") return `Usage period ended at ${endTime}. MST Testnet confirmed refund; the robot is AVAILABLE.`;
+      return `Usage period ended at ${endTime}. Verifying robot-session evidence; the robot remains IN_USE until settlement or refund is confirmed on MST Testnet.`;
     }
 
     const hours = Math.floor(remainingSeconds / 3600);
@@ -598,6 +764,10 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
   };
 
   const runRentFlow = async () => {
+    if (!IS_ROBO_PAY_ESCROW_DEPLOYED) {
+      setValidationError("RoboPay escrow has not been deployed to MST Testnet. No payment can be submitted.");
+      return;
+    }
     if (!connectedAddress) {
       setValidationError("Wallet not connected.");
       return;
@@ -643,6 +813,10 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
   };
 
   const confirmPayment = async () => {
+    if (!IS_ROBO_PAY_ESCROW_DEPLOYED) {
+      setToast({ type: "error", text: "RoboPay escrow is not deployed on MST Testnet. Payment was not submitted." });
+      return;
+    }
     if (transactionLock.current || !confirmation || !connectedAddress || !isMstTestnet) return;
     if (confirmation.customer.toLowerCase() !== connectedAddress.toLowerCase()) {
       setToast({ type: "error", text: "The connected wallet changed. Recreate the rental confirmation." });
@@ -801,26 +975,17 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         abi: ROBO_PAY_ABI,
         functionName: "getRental",
         args: [lock.orderId],
-      })) as [string, string, string, bigint, bigint, bigint, Address, bigint, bigint, boolean, boolean, Hex, Hex];
+      })) as RentalTuple;
+      const eventRental = rentalFromTuple(rentalData);
+      const escrowedAmount = await publicClient.readContract({
+        address: ROBO_PAY_ADDRESS,
+        abi: ROBO_PAY_ABI,
+        functionName: "escrowedAmount",
+        args: [lock.orderId],
+      });
 
-      const eventRental = {
-        orderId: rentalData[0],
-        robotId: rentalData[1],
-        service: rentalData[2],
-        durationMinutes: rentalData[3],
-        amountInr: rentalData[4],
-        amountPaidWei: rentalData[5],
-        customer: rentalData[6],
-        startTime: rentalData[7],
-        endTime: rentalData[8],
-        active: rentalData[9],
-        completed: rentalData[10],
-        activityHash: rentalData[11],
-        rentalDataHash: rentalData[12],
-      } satisfies RentalDetail;
-
-      if (!eventRental.active) {
-        throw new Error("The mined transaction did not create an active rental.");
+      if (!eventRental.active || eventRental.status !== 0 || escrowedAmount !== eventRental.amountPaidWei) {
+        throw new Error("The mined transaction did not create an active rental with matching contract escrow.");
       }
 
       const robotData = (await publicClient.readContract({
@@ -837,8 +1002,31 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
       await refreshRobots();
       setTxState("TRANSACTION_CONFIRMED");
       setConfirmation(null);
+
+      try {
+        setTxState("VERIFYING");
+        const verification = await api.verifyTransaction({
+          orderId: lock.orderId,
+          transactionHash: txHashValue,
+          customerAddress: connectedAddress,
+        });
+        setTxState(verification.verified ? "VERIFIED" : "FAILED");
+        if (verification.verified) {
+          setToast({ type: "success", text: `Blockchain transaction confirmed. Backend verification succeeded for order ${lock.orderId}.` });
+        } else {
+          setToast({ type: "error", text: `Blockchain transaction confirmed, but backend verification did not pass for order ${lock.orderId}.` });
+        }
+      } catch (error) {
+        setTxState("UNAVAILABLE");
+        setToast({
+          type: "info",
+          text: `Blockchain transaction confirmed. Backend verification is currently unavailable.`,
+        });
+        console.warn("Backend verification unavailable after successful BridgeKey transaction", error);
+      }
+
       setActiveTab("rentals");
-      setToast({ type: "success", text: `Rental authorized: ${lock.orderId}` });
+      setToast((current) => current ?? { type: "success", text: `Rental ${lock.orderId} is active. Payment is escrowed in the RoboPay contract.` });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Transaction failed";
       const diagnostic = getTransactionErrorDetails(error);
@@ -884,7 +1072,8 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
     }
   };
 
-  const readRentalRecord = async (orderId: string): Promise<RentalDetail | null> => {
+  const readRentalRecord = useCallback(async (orderId: string): Promise<RentalDetail | null> => {
+    if (!IS_ROBO_PAY_ESCROW_DEPLOYED) return null;
     const exists = await publicClient.readContract({
       address: ROBO_PAY_ADDRESS,
       abi: ROBO_PAY_ABI,
@@ -898,24 +1087,32 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
       abi: ROBO_PAY_ABI,
       functionName: "getRental",
       args: [orderId],
-    })) as [string, string, string, bigint, bigint, bigint, Address, bigint, bigint, boolean, boolean, Hex, Hex];
+    })) as RentalTuple;
 
-    return {
-      orderId: rentalData[0],
-      robotId: rentalData[1],
-      service: rentalData[2],
-      durationMinutes: rentalData[3],
-      amountInr: rentalData[4],
-      amountPaidWei: rentalData[5],
-      customer: rentalData[6],
-      startTime: rentalData[7],
-      endTime: rentalData[8],
-      active: rentalData[9],
-      completed: rentalData[10],
-      activityHash: rentalData[11],
-      rentalDataHash: rentalData[12],
-    } satisfies RentalDetail;
-  };
+    const rental = rentalFromTuple(rentalData);
+    try {
+      if (rental.status === 1) {
+        const logs = await publicClient.getLogs({
+          address: ROBO_PAY_ADDRESS,
+          event: parseAbiItem("event RentalSettled(string indexed orderId,string indexed robotId,address indexed recipient,uint256 amount,uint256 settledAt)"),
+          args: { orderId },
+          fromBlock: BigInt(0),
+        });
+        rental.settlementTxHash = logs.at(-1)?.transactionHash;
+      } else if (rental.status === 2) {
+        const logs = await publicClient.getLogs({
+          address: ROBO_PAY_ADDRESS,
+          event: parseAbiItem("event RentalRefunded(string indexed orderId,string indexed robotId,address indexed customer,uint256 amount,bytes32 failureReasonHash,bytes32 activityHash,uint256 refundedAt)"),
+          args: { orderId },
+          fromBlock: BigInt(0),
+        });
+        rental.refundTxHash = logs.at(-1)?.transactionHash;
+      }
+    } catch (error) {
+      console.warn("Outcome event lookup unavailable; transaction hash is not claimed.", error);
+    }
+    return rental;
+  }, []);
 
   const verifyRentalOrder = async (rawOrderId: string) => {
     const orderId = rawOrderId.trim();
@@ -961,7 +1158,13 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         console.warn("Unable to read robot state during rental verification", error);
       }
 
-      setVerificationResult({ status: "FOUND", orderId, rental, dataHashMatches, robotStatus });
+      const [paymentRecipient, activityVerification, outcome] = await Promise.all([
+        publicClient.readContract({ address: ROBO_PAY_ADDRESS, abi: ROBO_PAY_ABI, functionName: "paymentRecipient" }).then((value) => value as Address).catch(() => null),
+        api.verifyActivity(orderId).catch(() => null),
+        api.rentalOutcome(orderId).catch(() => null),
+      ]);
+
+      setVerificationResult({ status: "FOUND", orderId, rental, dataHashMatches, robotStatus, paymentRecipient, activityVerification, outcome });
     } catch (error) {
       console.error("Rental verification failed", error);
       setVerificationResult({ status: "ERROR", orderId, message: "Unable to read this rental from MST Testnet. Check the network and retry." });
@@ -983,98 +1186,80 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
       }
 
       const hasActivityHash = !/^0x0{64}$/i.test(rental.activityHash);
-      setAuditResult({ status: hasActivityHash ? "ANCHORED" : "PENDING", orderId, rental });
+      const [audit, verification, outcome] = await Promise.all([
+        api.audit(orderId).catch(() => null),
+        api.verifyActivity(orderId).catch(() => null),
+        api.rentalOutcome(orderId).catch(() => null),
+      ]);
+      setAuditResult({ status: hasActivityHash ? "ANCHORED" : "PENDING", orderId, rental, audit, verification, outcome });
     } catch (error) {
       console.error("Activity audit lookup failed", error);
       setAuditResult({ status: "ERROR", orderId, message: "Unable to load this rental from MST Testnet. Check the network and retry." });
     }
   };
 
-  const endRentalFromContract = async (orderId: string, automatic = false) => {
-    if (!connectedAddress || !isMstTestnet) {
-      if (!automatic) setToast({ type: "error", text: "Connect BridgeKey on MST Testnet to complete this rental." });
-      return;
-    }
-    if (expiryInFlight.current.has(orderId)) return;
-    if (automatic && (expiryAttempts.current.get(orderId) ?? 0) > 0) return;
-    expiryInFlight.current.add(orderId);
-    setCompletingOrders((current) => current.includes(orderId) ? current : [...current, orderId]);
-
+  const finalizeExpiredRental = useCallback(async (orderId: string) => {
     try {
-      const chainRental = await readRentalRecord(orderId);
-      if (!chainRental) throw new Error("Rental was not found on MST Testnet.");
-      if (chainRental.customer.toLowerCase() !== connectedAddress.toLowerCase()) {
-        throw new Error("Only the customer who created this rental can complete it from the customer app.");
-      }
-      if (!chainRental.active) {
-        await Promise.all([refreshRentals(), refreshRobots()]);
-        return;
-      }
-      if (currentTimeSeconds < Number(chainRental.endTime) && automatic) return;
-
-      const session = await getFreshBridgeKeySession(connectedAddress);
-      const gas = await publicClient.estimateContractGas({
-        address: ROBO_PAY_ADDRESS,
-        abi: ROBO_PAY_ABI,
-        functionName: "endRental",
-        args: [orderId],
-        account: session.account,
+      const outcome = await api.rentalOutcome(orderId);
+      const messages = {
+        ACTIVE: "Rental Active",
+        VERIFYING_SESSION: "VERIFYING ROBOT SESSION...",
+        SETTLING: "💰 SETTLING ESCROW...",
+        SETTLEMENT_RETRY_PENDING: "Settlement retry pending. Payment remains escrowed.",
+        REFUNDING: "💰 REFUNDING ESCROW...",
+        REFUND_RETRY_PENDING: "Refund retry pending. Payment remains escrowed.",
+        PENDING: "Robot session outcome is not yet verifiable.",
+        COMPLETED: "✅ RENTAL COMPLETED · PAYMENT SETTLED · ROBOT AVAILABLE",
+        REFUNDED: "✅ RENTAL REFUNDED · REFUND CONFIRMED · ROBOT AVAILABLE",
+      } satisfies Record<typeof outcome.state, string>;
+      const txHash = outcome.settlementTxHash ?? outcome.refundTxHash;
+      setRentalExpiryState((current) => {
+        const nextState = {
+          state: outcome.state,
+          message: messages[outcome.state],
+          paymentStatus: outcome.paymentStatus,
+          robotStatus: outcome.robotStatus,
+          adminAddress: outcome.adminAddress,
+          activityHash: outcome.activityHash,
+          anchorTxHash: outcome.anchorTxHash ?? undefined,
+          failureReasonHash: outcome.failureReasonHash ?? undefined,
+          evidenceMode: outcome.evidenceMode,
+          ...(txHash ? { txHash: txHash as Hex } : {}),
+        };
+        const previous = current[orderId];
+        if (previous?.state === nextState.state && previous.message === nextState.message && previous.txHash === nextState.txHash && previous.paymentStatus === nextState.paymentStatus && previous.robotStatus === nextState.robotStatus) return current;
+        return { ...current, [orderId]: nextState };
       });
-      const txHashValue = await session.walletClient.writeContract({
-        address: ROBO_PAY_ADDRESS,
-        abi: ROBO_PAY_ABI,
-        functionName: "endRental",
-        args: [orderId],
-        account: session.account,
-        chain: mstTestnet,
-        gas,
-      });
-
-      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHashValue, timeout: 120_000 });
-      if (receipt.status !== "success") throw new Error("endRental reverted on MST Testnet.");
-
-      const [confirmedRental, robotData] = await Promise.all([
-        readRentalRecord(orderId),
-        publicClient.readContract({
-          address: ROBO_PAY_ADDRESS,
-          abi: ROBO_PAY_ABI,
-          functionName: "getRobot",
-          args: [chainRental.robotId],
-        }) as Promise<[string, string, string, Address, number, boolean]>,
-      ]);
-      if (!confirmedRental || confirmedRental.active || !confirmedRental.completed || Number(robotData[4]) !== 0) {
-        throw new Error("The completion transaction was mined, but rental/robot state has not reached the expected completed/available state.");
-      }
-
-      await Promise.all([refreshRentals(), refreshRobots()]);
-      expiryAttempts.current.delete(orderId);
-      setToast({ type: "success", text: `Rental ${orderId} completed on MST Testnet.` });
     } catch (error) {
-      const diagnostic = getTransactionErrorDetails(error);
-      console.error("[Rental expiry] endRental failed", { orderId, automatic, diagnostic, error });
-      const attempts = (expiryAttempts.current.get(orderId) ?? 0) + 1;
-      expiryAttempts.current.set(orderId, attempts);
-      if (!automatic || attempts >= 1) {
-        setToast({ type: "error", text: `Rental time has ended, but blockchain completion is still pending. ${diagnostic}` });
-      }
-    } finally {
-      expiryInFlight.current.delete(orderId);
-      setCompletingOrders((current) => current.filter((entry) => entry !== orderId));
+      console.error("Expired rental outcome lookup failed", error);
+      setRentalExpiryState((current) => ({
+        ...current,
+        [orderId]: { state: "PENDING", message: "Robot session outcome is not yet verifiable." },
+      }));
     }
-  };
+  }, []);
 
   useEffect(() => {
-    if (!isMstTestnet || !connectedAddress) return;
-    const expired = activeRentals.filter((rental) => Number(rental.endTime) <= currentTimeSeconds);
-    for (const rental of expired) {
-      if (!expiryAttempts.current.has(rental.orderId)) {
-        expiryAttempts.current.set(rental.orderId, 0);
-        void endRentalFromContract(rental.orderId, true);
+    if (!historyRentals.length) return;
+
+    const pendingOrders = historyRentals.filter((rental) => rental.active && Number(rental.endTime) <= currentTimeSeconds);
+    if (pendingOrders.length === 0) return;
+
+    const tick = async () => {
+      for (const rental of pendingOrders) {
+        const currentState = rentalExpiryState[rental.orderId]?.state;
+        if (currentState === "COMPLETED" || currentState === "REFUNDED") continue;
+        await finalizeExpiredRental(rental.orderId);
       }
-    }
-    // endRentalFromContract guards concurrent calls and verifies canonical chain state before mutation.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTimeSeconds, isMstTestnet, connectedAddress, activeRentals.length]);
+    };
+
+    const timer = window.setInterval(() => {
+      void tick();
+    }, 5000);
+
+    void tick();
+    return () => window.clearInterval(timer);
+  }, [historyRentals, currentTimeSeconds, finalizeExpiredRental, rentalExpiryState]);
 
   const renderHome = () => (
     <div className="page-shell">
@@ -1083,8 +1268,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
           <span className="eyebrow">RoboPay Smart Mall</span>
           <h1>Rent Robots. Pay On-Chain. Trust Every Session.</h1>
           <p>
-            RoboPay is a blockchain-backed Robot-as-a-Service platform where every payment,
-            rental authorization, and robot session is independently verifiable and tamper-evident.
+            Customer payments stay in the RoboPay escrow contract while a robot session runs. Verified success settles to the operator; verified failure refunds the original customer.
           </p>
           <div className="cta-row">
             {!walletConnected ? (
@@ -1110,7 +1294,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
       <section className="feature-grid">
         <div className="glass-card feature-card">
           <h3>Blockchain Rental Authorization</h3>
-          <p>Each rental is created and stored on MST Testnet, with the exact native payment enforced by the contract.</p>
+          <p>Each rental is stored on MST Testnet and its exact native payment remains in contract escrow until an authorized outcome is recorded.</p>
         </div>
         <div className="glass-card feature-card">
           <h3>Tamper-Evident Rental History</h3>
@@ -1143,8 +1327,8 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         <div className="proof-grid">
           <div><label>Network</label><strong>MST Testnet</strong></div>
           <div><label>Chain ID</label><strong>{mstTestnet.id}</strong></div>
-          <div><label>Contract</label><strong>{shortenAddress(ROBO_PAY_ADDRESS)}</strong></div>
-          <div><label>Explorer</label><a href={CONTRACT_SCAN_URL} target="_blank" rel="noreferrer">View on MSTScan</a></div>
+          <div><label>Escrow contract</label><strong>{IS_ROBO_PAY_ESCROW_DEPLOYED ? shortenAddress(ROBO_PAY_ADDRESS) : "Not deployed"}</strong></div>
+          <div><label>Explorer</label>{IS_ROBO_PAY_ESCROW_DEPLOYED ? <a href={CONTRACT_SCAN_URL} target="_blank" rel="noreferrer">View on MSTScan</a> : <strong>MST Testnet</strong>}</div>
         </div>
       </section>
     </div>
@@ -1167,6 +1351,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         <div className="glass-card stat-card"><span>Available robots</span><strong>{availableRobotCount}</strong></div>
         <div className="glass-card stat-card"><span>Active rentals</span><strong>{activeRentalCount}</strong></div>
         <div className="glass-card stat-card"><span>Completed rentals</span><strong>{completedRentalCount}</strong></div>
+        <div className="glass-card stat-card"><span>Refunded rentals</span><strong>{refundedRentalCount}</strong></div>
         <div className="glass-card stat-card"><span>Total rentals</span><strong>{customerRentals.length}</strong></div>
       </section>
 
@@ -1177,7 +1362,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         {isLoadingRobots ? (
           <div className="loading-block">Loading robot status from blockchain…</div>
         ) : (
-          robots.length === 0 ? <div className="loading-block">No robots are registered in the RoboPay contract.</div> :
+          robots.length === 0 ? <div className="loading-block">{IS_ROBO_PAY_ESCROW_DEPLOYED ? "No robots are registered in the RoboPay escrow contract." : "The new RoboPay escrow contract has not been deployed to MST Testnet. The legacy contract is intentionally not used."}</div> :
           <div className="robot-grid">
             {robots.map((robot) => (
               <div key={robot.id} className="robot-card glass-subcard">
@@ -1191,7 +1376,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
                 <p>{robot.service}</p>
                 {robot.status === 1 ? <p className="network-banner">{getRobotUsageMessage(robot.id)}</p> : null}
                 <div className="pricing-list">
-                  {(robotPricingMap[robot.id] ?? [10]).map((duration) => {
+                  {(robotPricingMap[robot.id] ?? [1, 2, 3]).map((duration) => {
                     const price = robotPrices[robot.id]?.find((item) => item.durationMinutes === duration);
                     return (
                       <div key={duration} className="mini-package">
@@ -1204,11 +1389,34 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
                 </div>
                 <button className="primary compact" disabled={robot.status !== 0} onClick={() => {
                   setSelectedRobotId(robot.id);
-                  setSelectedDuration(robotPricingMap[robot.id]?.[0] ?? 10);
+                  setSelectedDuration(robotPricingMap[robot.id]?.[0] ?? 1);
                   setActiveTab("robot");
                 }}>{robot.status === 1 ? "Currently in use" : "Select robot"}</button>
               </div>
             ))}
+            {IS_ROBO_PAY_ESCROW_DEPLOYED && !robots.some((robot) => robot.id === "RC-01") ? (
+              <div className="robot-card glass-subcard">
+                <div className="robot-head">
+                  <div>
+                    <div className="mini-label">RC-01</div>
+                    <h4>RoboCourier</h4>
+                  </div>
+                  <span className="status-pill status-inuse">NOT DEPLOYED</span>
+                </div>
+                <p>Autonomous Parcel Delivery</p>
+                <p className="network-banner">RoboCourier is configured in the source but is not registered in the current MST Testnet contract. It cannot be booked until a compatible contract is safely deployed.</p>
+                <div className="pricing-list">
+                  {[1, 2, 3].map((duration) => (
+                    <div key={duration} className="mini-package">
+                      <span>{duration} min</span>
+                      <strong>Deployment pending</strong>
+                      <small>Not bookable on this contract</small>
+                    </div>
+                  ))}
+                </div>
+                <button className="secondary compact" disabled>Awaiting contract deployment</button>
+              </div>
+            ) : null}
           </div>
         )}
       </section>
@@ -1323,6 +1531,8 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
             <div className="line-item"><span>Wallet</span><strong>{shortenAddress(confirmation.customer)}</strong></div>
             <div className="line-item"><span>Network</span><strong>MST Testnet</strong></div>
             <div className="line-item"><span>Contract</span><strong>{shortenAddress(ROBO_PAY_ADDRESS)}</strong></div>
+            <div className="line-item"><span>Payment handling</span><strong>Held by RoboPay escrow</strong></div>
+            <p className="muted">Funds are not sent to Admin at rental creation. An authorized operator settles only after verified session success, or refunds after verified failure evidence.</p>
             {txHash ? (
               <p className="muted">
                 Transaction submitted: <a href={getMstscanTxUrl(txHash)} target="_blank" rel="noreferrer">{shortenAddress(txHash)}</a>
@@ -1340,6 +1550,12 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
                 <button className="primary" onClick={confirmPayment} disabled={isTransactionLocked || !isMstTestnet}>
                   {isTransactionLocked ? "Waiting for BridgeKey…" : "Confirm payment"}
                 </button>
+              ) : null}
+              {txHash ? (
+                <div className="verification-box glass-subcard">
+                  <strong>Blockchain Transaction Confirmed</strong>
+                  <p>{txState === "VERIFYING" ? "Backend Verification" : txState === "VERIFIED" ? "✓ Transaction Verified" : txState === "UNAVAILABLE" ? "Blockchain transaction confirmed. Backend verification is currently unavailable." : "Backend Verification"}</p>
+                </div>
               ) : null}
             </div>
           </div>
@@ -1365,8 +1581,12 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
               const hours = Math.floor(remainingSeconds / 3600);
               const minutes = Math.floor((remainingSeconds % 3600) / 60);
               const seconds = remainingSeconds % 60;
-              const rentalCompleting = completingOrders.includes(rental.orderId);
-
+              const outcomeState = rentalExpiryState[rental.orderId];
+              const expiryState = outcomeState?.state ?? (rental.completed ? "COMPLETED" : rental.refunded ? "REFUNDED" : rental.active && remainingSeconds === 0 ? "VERIFYING_SESSION" : "ACTIVE");
+              const expiryMessage = rentalExpiryState[rental.orderId]?.message ?? "Rental Active";
+              const expiryTxHash = rentalExpiryState[rental.orderId]?.txHash;
+              const paymentStatus = outcomeState?.paymentStatus ?? (rental.active ? "ESCROWED" : rental.completed ? "SETTLED" : "REFUNDED");
+              const currentRobotStatus = outcomeState?.robotStatus ?? (robots.find((robot) => robot.id === rental.robotId)?.status === 0 ? "AVAILABLE" : "IN_USE");
               return (
                 <div key={rental.orderId} className="glass-subcard rental-card">
                   <div className="robot-head">
@@ -1374,30 +1594,41 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
                       <div className="mini-label">{rental.orderId}</div>
                       <h4>{rental.robotId}</h4>
                     </div>
-                    <span className={`status-pill ${rental.active ? "status-active" : ""}`}>{formatRentalStatus(rental.active, rental.completed)}</span>
+                    <span className={`status-pill ${expiryState === "COMPLETED" || expiryState === "REFUNDED" ? "status-available" : "status-active"}`}>
+                      {expiryState === "ACTIVE" ? formatRentalStatus(rental.status) : expiryState}
+                    </span>
                   </div>
                   <div className="meta-grid two-col">
                     <div><label>Service</label><strong>{rental.service}</strong></div>
                     <div><label>Duration</label><strong>{Number(rental.durationMinutes)} mins</strong></div>
                     <div><label>Start</label><strong>{new Date(Number(rental.startTime) * 1000).toLocaleString()}</strong></div>
                     <div><label>End</label><strong>{new Date(Number(rental.endTime) * 1000).toLocaleString()}</strong></div>
-                    {rental.active ? <div><label>Time left</label><strong>{remainingSeconds > 0 ? `${hours}h ${minutes}m ${seconds}s` : "RENTAL TIME COMPLETED"}</strong></div> : null}
-                    <div><label>Paid</label><strong>{formatEther(rental.amountPaidWei)} tMSTC</strong></div>
+                    {rental.active ? <div><label>Time left</label><strong>{remainingSeconds > 0 ? `${hours}h ${minutes}m ${seconds}s` : "00:00"}</strong></div> : null}
+                    <div><label>Payment status</label><strong>{paymentStatus}</strong></div>
+                    <div><label>Robot status</label><strong>{currentRobotStatus}</strong></div>
+                    <div><label>Amount</label><strong>{formatEther(rental.amountPaidWei)} tMSTC</strong></div>
+                    {rental.active ? <div><label>Held by</label><strong>RoboPay escrow contract</strong></div> : null}
                   </div>
                   {rental.active && remainingSeconds === 0 ? (
-                    <p className="network-banner">
-                      {rentalCompleting
-                        ? "Completing rental on MST Testnet…"
-                        : "Rental time has ended, but blockchain completion is still pending. The robot remains IN_USE until endRental is confirmed."}
-                    </p>
-                  ) : null}
-                  {rental.active ? (
-                    <div className="modal-actions">
-                      <button className="secondary" onClick={() => void endRentalFromContract(rental.orderId)} disabled={rentalCompleting || !isMstTestnet}>
-                        {rentalCompleting ? "Completing…" : remainingSeconds === 0 ? "Retry completion" : "Complete rental"}
-                      </button>
+                    <div className="network-banner">
+                      <strong>Rental time completed</strong>
+                      <div>{expiryState === "VERIFYING_SESSION" ? "VERIFYING ROBOT SESSION..." : expiryState === "SETTLING" ? "💰 SETTLING ESCROW..." : expiryState === "SETTLEMENT_RETRY_PENDING" ? "Settlement retry pending" : expiryState === "REFUNDING" ? "💰 REFUNDING ESCROW..." : expiryState === "REFUND_RETRY_PENDING" ? "Refund retry pending" : expiryState === "PENDING" ? "⏳ COMPLETION PENDING" : expiryState === "COMPLETED" ? "✅ SESSION VERIFIED · RENTAL COMPLETED · PAYMENT SETTLED" : expiryState === "REFUNDED" ? "⚠ FAILURE VERIFIED · RENTAL REFUNDED · REFUND CONFIRMED" : "VERIFYING ROBOT SESSION..."}</div>
+                      <div>{expiryMessage}</div>
+                      {outcomeState?.evidenceMode === "DEMO_SIMULATED" ? <div className="muted">DEMO SIMULATION EVIDENCE · not physical robot telemetry</div> : null}
+                      {expiryState === "PENDING" ? <div>Robot session outcome is not yet verifiable. Payment remains ESCROWED and the robot remains IN_USE.</div> : null}
+                      {expiryState === "COMPLETED" && outcomeState?.adminAddress ? <div>Admin received {formatEther(rental.amountPaidWei)} tMSTC: {outcomeState.adminAddress}</div> : null}
+                      {expiryState === "COMPLETED" && outcomeState?.activityHash ? <div>Activity hash: <span className="mono">{outcomeState.activityHash}</span></div> : null}
+                      {expiryState === "COMPLETED" && outcomeState?.anchorTxHash ? <div>Anchor transaction: <span className="mono">{outcomeState.anchorTxHash}</span></div> : null}
+                      {expiryState === "REFUNDED" && outcomeState?.failureReasonHash ? <div>Failure evidence hash: <span className="mono">{outcomeState.failureReasonHash}</span></div> : null}
                     </div>
                   ) : null}
+                  {rental.active && remainingSeconds > 0 ? <p className="muted">Rental Active</p> : null}
+                  {rental.active ? <p className="muted">Payment is held by the RoboPay Smart Contract and has not been paid to Admin.</p> : null}
+                  {rental.completed ? <p className="network-banner">Session marked successful on-chain. Payment settled to Admin.</p> : null}
+                  {rental.refunded ? <p className="network-banner">Rental refunded on-chain to {shortenAddress(rental.customer)}. Failure evidence: <span className="mono">{rental.failureReasonHash}</span></p> : null}
+                  {rental.completed && rental.settlementTxHash ? <p><a href={getMstscanTxUrl(rental.settlementTxHash as Hex)} target="_blank" rel="noreferrer">View settlement transaction on MSTScan</a></p> : null}
+                  {rental.refunded && rental.refundTxHash ? <p><a href={getMstscanTxUrl(rental.refundTxHash as Hex)} target="_blank" rel="noreferrer">View refund transaction on MSTScan</a></p> : null}
+                  {expiryTxHash ? <p><a href={getMstscanTxUrl(expiryTxHash)} target="_blank" rel="noreferrer">View completion transaction on MSTScan</a></p> : null}
                 </div>
               );
             })}
@@ -1438,7 +1669,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
                     <td>{rental.service}</td>
                     <td>{Number(rental.durationMinutes)} min</td>
                     <td>₹{Number(rental.amountInr).toLocaleString()}</td>
-                    <td>{formatRentalStatus(rental.active, rental.completed)}</td>
+                    <td>{formatRentalStatus(rental.status)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1479,15 +1710,17 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
           <div className="verification-box glass-subcard error-banner"><strong>Verification unavailable</strong><p>{verificationResult.message}</p></div>
         )}
         {verificationResult.status === "FOUND" && (() => {
-          const { rental, dataHashMatches, robotStatus } = verificationResult;
+          const { rental, dataHashMatches, robotStatus, paymentRecipient, activityVerification, outcome } = verificationResult;
           const computedHash = computeRentalDataHash(rental.orderId, rental.robotId, rental.service, Number(rental.durationMinutes), rental.amountInr, rental.customer, rental.startTime, rental.endTime);
           const hasActivityHash = !/^0x0{64}$/i.test(rental.activityHash);
           const remaining = Math.max(Number(rental.endTime) - Math.floor(Date.now() / 1000), 0);
           const dataMismatch = !dataHashMatches || computedHash.toLowerCase() !== rental.rentalDataHash.toLowerCase();
+          const settlementHash = rental.settlementTxHash ?? outcome?.settlementTxHash ?? undefined;
+          const refundHash = rental.refundTxHash ?? outcome?.refundTxHash ?? undefined;
           return (
             <div className="verification-box glass-subcard">
               <div className={`verification-badge ${dataMismatch ? "error-banner" : ""}`}>
-                {dataMismatch ? "TAMPER DETECTED" : rental.completed ? "RENTAL COMPLETED" : rental.active ? "RENTAL ACTIVE" : "RENTAL INACTIVE"}
+                {dataMismatch ? "TAMPER DETECTED" : formatRentalStatus(rental.status)}
               </div>
               {dataMismatch ? <p>The current data does not match the cryptographic record anchored on MST Testnet.</p> : null}
               <h3>On-chain record</h3>
@@ -1501,20 +1734,33 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
                 <div><label>tMSTC paid</label><strong>{formatEther(rental.amountPaidWei)} tMSTC</strong></div>
                 <div><label>Start time</label><strong>{new Date(Number(rental.startTime) * 1000).toLocaleString()}</strong></div>
                 <div><label>End time</label><strong>{new Date(Number(rental.endTime) * 1000).toLocaleString()}</strong></div>
-                <div><label>Rental status</label><strong>{formatRentalStatus(rental.active, rental.completed)}</strong></div>
+                <div><label>Rental status</label><strong>{formatRentalStatus(rental.status)}</strong></div>
+                <div><label>Payment status</label><strong>{rental.active ? "ESCROWED" : rental.completed ? "SETTLED" : "REFUNDED"}</strong></div>
+                <div><label>Escrow amount</label><strong>{formatEther(rental.amountPaidWei)} tMSTC</strong></div>
                 <div><label>Robot status</label><strong>{robotStatus === null ? "Unavailable" : formatRobotStatus(robotStatus)}</strong></div>
                 {rental.active && !rental.completed ? <div><label>Time remaining</label><strong>{Math.floor(remaining / 60)}m {remaining % 60}s</strong></div> : null}
                 <div><label>On-chain rental data hash</label><strong className="mono">{rental.rentalDataHash}</strong></div>
                 <div><label>Computed rental data hash</label><strong className="mono">{computedHash}</strong></div>
                 <div><label>Activity audit hash</label><strong className="mono">{rental.activityHash}</strong></div>
+                {rental.refunded ? <div><label>Failure evidence hash</label><strong className="mono">{rental.failureReasonHash}</strong></div> : null}
+                {rental.completed ? <div><label>Admin</label><strong>{paymentRecipient ?? "Unable to read payment recipient"}</strong></div> : null}
+                {rental.completed ? <div><label>Settlement confirmation</label><strong>{settlementHash ? "Confirmed on MST Testnet" : "Confirmed on-chain; transaction hash unavailable"}</strong></div> : null}
+                {rental.completed && settlementHash ? <div><label>Settlement transaction</label><a href={getMstscanTxUrl(settlementHash as Hex)} target="_blank" rel="noreferrer">{shortenAddress(settlementHash)}</a></div> : null}
+                {rental.refunded ? <div><label>Refund recipient</label><strong>{rental.customer}</strong></div> : null}
+                {rental.refunded && refundHash ? <div><label>Refund transaction</label><a href={getMstscanTxUrl(refundHash as Hex)} target="_blank" rel="noreferrer">{shortenAddress(refundHash)}</a></div> : null}
               </div>
               <h3>Verification result</h3>
               <p>{dataMismatch ? "Rental data: HASH MISMATCH" : "Rental data: VERIFIED"}</p>
               {hasActivityHash ? (
-                <p>Activity audit: HASH ANCHORED. Off-chain session data is unavailable for recomputation.</p>
+                <>
+                  <p>Activity audit: {activityVerification?.status ?? "VERIFICATION UNAVAILABLE"}{activityVerification?.verified ? " · SESSION VERIFIED" : ""}</p>
+                  {activityVerification?.computedHash ? <p className="mono">Computed activity hash: {activityVerification.computedHash}</p> : null}
+                  {activityVerification?.transactionHash ? <p>Anchor transaction: <a href={getMstscanTxUrl(activityVerification.transactionHash as Hex)} target="_blank" rel="noreferrer">{shortenAddress(activityVerification.transactionHash)}</a></p> : null}
+                </>
               ) : (
                 <p>{rental.completed ? "Activity audit: Rental completed, but activity audit was not anchored." : "Activity audit: AUDIT NOT YET ANCHORED. Robot session activity has not yet been anchored to MST Testnet."}</p>
               )}
+              {outcome?.state === "PENDING" || outcome?.state === "VERIFYING_SESSION" ? <p>Session outcome: {outcome.state === "PENDING" ? "UNKNOWN · COMPLETION PENDING" : "VERIFYING ROBOT SESSION"}</p> : null}
               <a href={CONTRACT_SCAN_URL} target="_blank" rel="noreferrer">View Contract on MSTScan</a>
               {lastRentalTx?.orderId === rental.orderId ? <p><a href={getMstscanTxUrl(lastRentalTx.hash)} target="_blank" rel="noreferrer">View Transaction on MSTScan</a></p> : null}
             </div>
@@ -1554,26 +1800,40 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
         {auditResult.status === "ERROR" && <div className="verification-box glass-subcard error-banner"><strong>Audit unavailable</strong><p>{auditResult.message}</p></div>}
         {(auditResult.status === "PENDING" || auditResult.status === "ANCHORED") && (() => {
           const rental = auditResult.rental;
-          const anchored = auditResult.status === "ANCHORED";
+          const audit = auditResult.audit;
+          const verification = auditResult.verification;
+          const outcome = auditResult.outcome;
+          const sessionVerified = outcome?.sessionStatus === "SUCCESS" && verification?.verified === true;
+          const failureVerified = outcome?.sessionStatus === "FAILURE";
+          const anchorTxHash = verification?.transactionHash ?? outcome?.anchorTxHash;
+          const refundTxHash = outcome?.refundTxHash;
           return (
             <div className="verification-box glass-subcard">
-              <div className="verification-badge">{rental.completed ? "RENTAL COMPLETED" : rental.active ? "SESSION ACTIVE" : "RENTAL INACTIVE"}</div>
-              <h3>{anchored ? "ACTIVITY HASH ANCHORED" : rental.completed ? "NOT ANCHORED" : "AWAITING ACTIVITY HASH"}</h3>
+              <div className="verification-badge">{failureVerified ? "FAILURE VERIFIED" : sessionVerified ? "SESSION VERIFIED" : outcome?.state === "PENDING" ? "AUDIT / SESSION VERIFICATION PENDING" : rental.active ? "SESSION ACTIVE" : "AUDIT VERIFICATION PENDING"}</div>
+              <h3>{failureVerified ? "ROBOT FAILURE EVIDENCE" : sessionVerified ? "SUCCESSFUL SESSION EVIDENCE" : "AUDIT PENDING"}</h3>
               <div className="meta-grid">
                 <div><label>Order ID</label><strong>{rental.orderId}</strong></div>
                 <div><label>Robot</label><strong>{rental.robotId}</strong></div>
-                <div><label>Session status</label><strong>{formatRentalStatus(rental.active, rental.completed)}</strong></div>
+                <div><label>Rental status</label><strong>{outcome?.rentalStatus ?? formatRentalStatus(rental.status)}</strong></div>
+                <div><label>Session status</label><strong>{audit?.session?.status ?? outcome?.sessionStatus ?? "UNKNOWN"}</strong></div>
+                <div><label>Payment status</label><strong>{outcome?.paymentStatus ?? (rental.active ? "ESCROWED" : rental.completed ? "SETTLED" : "REFUNDED")}</strong></div>
+                <div><label>Robot status</label><strong>{outcome?.robotStatus ?? (rental.active ? "IN_USE" : "Read from chain during refresh")}</strong></div>
                 <div><label>Session start</label><strong>{new Date(Number(rental.startTime) * 1000).toLocaleString()}</strong></div>
                 <div><label>Expected end</label><strong>{new Date(Number(rental.endTime) * 1000).toLocaleString()}</strong></div>
+                <div><label>Activity hash</label><strong className="mono">{rental.activityHash}</strong></div>
+                <div><label>Verification result</label><strong>{verification?.status ?? audit?.activityStatus ?? "DATA_UNAVAILABLE"}</strong></div>
+                {outcome ? <div><label>Evidence source</label><strong>{outcome.evidenceMode === "DEMO_SIMULATED" ? "DEMO SIMULATED" : outcome.evidenceMode === "ROBOT_SESSION" ? "ROBOT SESSION" : "UNAVAILABLE"}</strong></div> : null}
+                {anchorTxHash ? <div><label>Anchor transaction</label><a href={getMstscanTxUrl(anchorTxHash as Hex)} target="_blank" rel="noreferrer">{shortenAddress(anchorTxHash)}</a></div> : null}
+                {failureVerified && outcome?.failureType ? <div><label>Failure type</label><strong>{outcome.failureType}</strong></div> : null}
+                {failureVerified && outcome?.failureReasonHash ? <div><label>Failure evidence hash</label><strong className="mono">{outcome.failureReasonHash}</strong></div> : null}
+                {outcome?.state === "REFUNDED" && refundTxHash ? <div><label>Refund transaction</label><a href={getMstscanTxUrl(refundTxHash as Hex)} target="_blank" rel="noreferrer">{shortenAddress(refundTxHash)}</a></div> : null}
               </div>
-              {anchored ? (
-                <>
-                  <p className="mono">On-chain activity hash: {rental.activityHash}</p>
-                  <p className="muted">Off-chain session data is currently unavailable for recomputation. Verification pending; no match or mismatch is claimed.</p>
-                </>
-              ) : (
-                <p className="muted">{rental.completed ? "This rental completed, but no robot activity hash was anchored for the session." : "The robot session is currently active. The cryptographic activity record has not yet been anchored."}</p>
-              )}
+              {verification?.verified ? <p>SESSION VERIFIED: computed activity hash matches the on-chain anchor.</p> : null}
+              {outcome?.state === "PENDING" ? <p className="muted">Robot session outcome is not yet verifiable. Escrow remains held and the robot remains IN_USE.</p> : null}
+              {failureVerified && outcome?.state !== "REFUNDED" ? <p className="muted">Failure evidence is verified; refund transaction confirmation is still pending.</p> : null}
+              {audit?.failureEvidence.map((item) => (
+                <p key={item.id} className="muted">{item.type}: {item.status} · <span className="mono">{item.hash}</span></p>
+              ))}
               <a href={CONTRACT_SCAN_URL} target="_blank" rel="noreferrer">View Contract on MSTScan</a>
             </div>
           );
@@ -1587,7 +1847,7 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
       <section className="glass-card detail-card">
         <h2>Contract and blockchain info</h2>
         <div className="proof-grid">
-          <div><label>RoboPay contract</label><strong>{ROBO_PAY_ADDRESS}</strong></div>
+          <div><label>RoboPay escrow contract</label><strong>{IS_ROBO_PAY_ESCROW_DEPLOYED ? ROBO_PAY_ADDRESS : "Not yet deployed"}</strong></div>
           <div><label>Network</label><strong>MST Testnet</strong></div>
           <div><label>Chain ID</label><strong>{mstTestnet.id}</strong></div>
           <div><label>RPC</label><a href="https://testnetrpc.mstblockchain.com" target="_blank" rel="noreferrer">https://testnetrpc.mstblockchain.com</a></div>
@@ -1600,7 +1860,37 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
           <span>Rental History</span>
           <span>Activity Hash Audit</span>
         </div>
-        <a className="primary button-link" href={CONTRACT_SCAN_URL} target="_blank" rel="noreferrer">View Contract on MSTScan</a>
+        <div className="network-banner">Customer payment → RoboPay escrow → successful verified session: Admin settlement → verified failure: customer refund. Timer expiry alone does not release funds or mark the robot available.</div>
+        {IS_ROBO_PAY_ESCROW_DEPLOYED ? <a className="primary button-link" href={CONTRACT_SCAN_URL} target="_blank" rel="noreferrer">View Contract on MSTScan</a> : null}
+        <div className="section-header">
+          <h3>Contract events</h3>
+          {IS_ROBO_PAY_ESCROW_DEPLOYED ? <button className="secondary compact" onClick={() => void refreshContractEvents()} disabled={isLoadingEvents}>{isLoadingEvents ? "Refreshing…" : "Refresh events"}</button> : null}
+        </div>
+        {!IS_ROBO_PAY_ESCROW_DEPLOYED ? (
+          <p className="muted">Escrow events will appear after the new contract is deployed to MST Testnet.</p>
+        ) : eventLoadError ? (
+          <div className="network-banner error-banner">{eventLoadError}</div>
+        ) : isLoadingEvents ? (
+          <div className="loading-block">Reading contract events from MST Testnet…</div>
+        ) : contractEvents.length === 0 ? (
+          <p className="muted">No escrow events found in the recent contract history.</p>
+        ) : (
+          <div className="history-table-wrap">
+            <table className="history-table">
+              <thead><tr><th>Event</th><th>Order</th><th>Block</th><th>Transaction</th></tr></thead>
+              <tbody>
+                {contractEvents.map((event) => (
+                  <tr key={`${event.transactionHash}-${event.name}`}>
+                    <td>{event.name}</td>
+                    <td>{event.orderId}</td>
+                    <td>{event.blockNumber.toString()}</td>
+                    <td><a href={getMstscanTxUrl(event.transactionHash)} target="_blank" rel="noreferrer">{shortenAddress(event.transactionHash)}</a></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
     </div>
   );
@@ -1645,6 +1935,9 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
 
         <div className="wallet-rail">
           <span className={`network-indicator ${isMstTestnet ? "ok" : "warning"}`}>{walletStatusText}</span>
+          <span className={`network-indicator ${backendStatus === "healthy" ? "ok" : backendStatus === "degraded" ? "warning" : "warning"}`}>
+            {backendStatus === "healthy" ? "Backend Connected" : backendStatus === "degraded" ? "Backend Degraded" : "Backend Unavailable"}
+          </span>
           {!walletConnected ? (
             <button className="primary compact" onClick={() => handleConnect(bridgeKeyConnector)} disabled={walletResolving}>
               {walletResolving ? "Connecting…" : "Connect BridgeKey"}
@@ -1662,6 +1955,10 @@ export function RoboPayApp({ initialTab = "home" }: { initialTab?: PageName }) {
       </header>
 
       {toast ? <div className={`toast toast-${toast.type}`}>{toast.text}</div> : null}
+
+      {!IS_ROBO_PAY_ESCROW_DEPLOYED ? (
+        <div className="network-banner error-banner">RoboPay Escrow is not deployed to MST Testnet yet. The legacy contract is disabled for customer rentals; no escrow payment can be submitted.</div>
+      ) : null}
 
       {walletRequiredPage && (!walletConnected || !isMstTestnet) ? (
         <div className="network-banner">

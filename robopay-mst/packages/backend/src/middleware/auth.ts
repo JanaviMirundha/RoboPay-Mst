@@ -1,30 +1,25 @@
+import { timingSafeEqual } from "node:crypto";
 import type { FastifyReply, FastifyRequest } from "fastify";
 
 import { env } from "../config/env.js";
 import { ERRORS } from "../utils/errors.js";
 
 export function requireApiKey(apiKeyName: "ADMIN_API_KEY" | "ROBOT_API_KEY") {
-  return async function (request: FastifyRequest, reply: FastifyReply) {
+  return async function (request: FastifyRequest, _reply: FastifyReply) {
     const header = request.headers["x-api-key"];
     const key = Array.isArray(header) ? header[0] : header;
     const expected = env[apiKeyName];
 
-    if (!expected || !key || key !== expected) {
+    const suppliedBuffer = Buffer.from(key ?? "");
+    const expectedBuffer = Buffer.from(expected ?? "");
+    const valid = suppliedBuffer.length === expectedBuffer.length && suppliedBuffer.length > 0 && timingSafeEqual(suppliedBuffer, expectedBuffer);
+    if (!valid) {
       throw ERRORS.UNAUTHORIZED("Missing or invalid API key");
     }
   };
 }
 
-export async function requireOwnerWalletValidation(request: FastifyRequest, reply: FastifyReply) {
-  const owner = request.headers["x-owner-wallet"];
-  if (!owner || typeof owner !== "string") {
-    throw ERRORS.FORBIDDEN("Missing owner wallet");
-  }
-
+export async function requireOwnerWalletValidation(_request: FastifyRequest, _reply: FastifyReply) {
   const { blockchainService } = await import("../services/blockchain.service.js");
-  const contractOwner = await blockchainService.getOwner();
-
-  if (owner.toLowerCase() !== contractOwner.toLowerCase()) {
-    throw ERRORS.OWNER_WALLET_MISMATCH();
-  }
+  await blockchainService.requireOperatorOwner();
 }

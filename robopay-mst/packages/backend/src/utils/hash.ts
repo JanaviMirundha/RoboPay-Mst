@@ -1,35 +1,43 @@
 import { createHash } from "node:crypto";
+import { AbiCoder, getAddress, keccak256 } from "ethers";
+import { stableStringify } from "./stable-json.js";
 
-export function stableStringify(value: unknown): string {
-  if (value === null || value === undefined) return "null";
-  if (typeof value === "bigint") return value.toString();
-  if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
-  }
-
-  if (typeof value === "object") {
-    const sorted = Object.keys(value as Record<string, unknown>)
-      .sort()
-      .reduce<Record<string, unknown>>((acc, key) => {
-        acc[key] = (value as Record<string, unknown>)[key];
-        return acc;
-      }, {});
-
-    return `{${Object.entries(sorted)
-      .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)
-      .join(",")}}`;
-  }
-
-  return JSON.stringify(value);
-}
+export { stableStringify };
 
 export function sha256Hex(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 export function sha256Bytes32(value: string): `0x${string}` {
-  return `0x${sha256Hex(value).padStart(64, "0")}` as `0x${string}`;
+  return `0x${sha256Hex(value)}` as `0x${string}`;
+}
+
+export function sha256StableBytes32(value: unknown): `0x${string}` {
+  return sha256Bytes32(stableStringify(value));
+}
+
+export function computeRentalDataHash(input: {
+  orderId: string;
+  robotId: string;
+  service: string;
+  durationMinutes: bigint | number | string;
+  amountInr: bigint | number | string;
+  customer: string;
+  startTime: bigint | number | string;
+  endTime: bigint | number | string;
+}): `0x${string}` {
+  const coder = AbiCoder.defaultAbiCoder();
+  return keccak256(coder.encode(
+    ["string", "string", "string", "uint256", "uint256", "address", "uint256", "uint256"],
+    [
+      input.orderId,
+      input.robotId,
+      input.service,
+      BigInt(input.durationMinutes),
+      BigInt(input.amountInr),
+      getAddress(input.customer),
+      BigInt(input.startTime),
+      BigInt(input.endTime),
+    ],
+  )) as `0x${string}`;
 }

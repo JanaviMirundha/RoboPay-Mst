@@ -1,11 +1,11 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
+import { Hello__factory } from "../typechain-types";
 
 describe("Hello", () => {
   async function deployFixture() {
     const [owner, other] = await ethers.getSigners();
-    const Hello = await ethers.getContractFactory("Hello");
-    const hello = await Hello.deploy("Hello, MST!");
+    const hello = await new Hello__factory(owner).deploy("Hello, MST!");
     await hello.waitForDeployment();
     return { hello, owner, other };
   }

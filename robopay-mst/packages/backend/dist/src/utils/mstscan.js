@@ -1,10 +1,13 @@
 export const MSTSCAN_BASE = "https://testnet.mstscan.com";
-export function getContractUrl(address) {
+export function contractUrl(address) {
     return `${MSTSCAN_BASE}/address/${address}`;
 }
-export function getTransactionUrl(txHash) {
+export function transactionUrl(txHash) {
     return `${MSTSCAN_BASE}/tx/${txHash}`;
 }
-export function getAddressUrl(address) {
+export function addressUrl(address) {
     return `${MSTSCAN_BASE}/address/${address}`;
 }
+export const getContractUrl = contractUrl;
+export const getTransactionUrl = transactionUrl;
+export const getAddressUrl = addressUrl;

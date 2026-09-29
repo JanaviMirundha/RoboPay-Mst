@@ -19,6 +19,9 @@ model RobotSession {
   activityHash     String?
   hashAnchored     Boolean  @default(false)
   anchorTxHash     String?
+  failureReportStatus String  @default("NONE")
+  auditStatus      String   @default("NOT_ANCHORED")
+  telemetry        RobotTelemetry[]
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -39,9 +42,17 @@ model RentalSnapshot {
   endTime           BigInt?
   active            Boolean  @default(false)
   completed         Boolean  @default(false)
+  status            String   @default("ACTIVE")
+  paymentStatus     String   @default("ESCROWED")
   rentalDataHash    String?
   activityHash      String?
+  failureReasonHash String?
+  settledAt         BigInt?
+  creationTxHash    String?
+  settlementTxHash  String?
+  refundTxHash      String?
   lastSyncedBlock   Int?
+  lastSyncedBlockHash String?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -60,6 +71,8 @@ model ActivityAudit {
   timestamp        DateTime
   blockchainAnchored Boolean @default(false)
   anchorTxHash     String?
+  status           String   @default("NOT_ANCHORED")
+  sessionDataHash  String?
   createdAt        DateTime @default(now())
 
   @@index([orderId])
@@ -69,8 +82,11 @@ model ActivityAudit {
 
 model BlockchainEvent {
   id               String   @id @default(cuid())
-  txHash           String   @unique
+  txHash           String
+  logIndex         Int
+  eventKey         String   @unique
   blockNumber      Int
+  blockHash        String?
   blockTimestamp   DateTime
   contractAddress  String
   eventName        String
@@ -78,7 +94,7 @@ model BlockchainEvent {
   processed        Boolean  @default(false)
   createdAt        DateTime @default(now())
 
-  @@index([txHash])
+  @@unique([txHash, logIndex])
   @@index([blockNumber])
   @@index([eventName])
 }
@@ -90,6 +106,8 @@ model RobotTelemetry {
   timestamp        DateTime
   telemetryJson    String
   telemetryHash    String
+  sessionId        String?
+  session          RobotSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   createdAt        DateTime @default(now())
 
   @@index([robotId])
@@ -111,8 +129,57 @@ model VerificationRecord {
   @@index([verificationType])
 }
 
-model SyncState {
-  id               String @id @default("blockchain")
-  lastProcessedBlock Int @default(0)
+model FailureEvidence {
+  id               String   @id @default(cuid())
+  orderId          String
+  robotId          String
+  customerAddress  String?
+  failureType      String
+  description      String
+  evidenceJson     String
+  evidenceHash     String
+  status           String   @default("REPORTED")
+  reviewedBy       String?
+  reviewedAt       DateTime?
+  refundTxHash     String?
+  createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+
+  @@index([orderId])
+  @@index([robotId])
+  @@index([status])
+}
+
+model TransactionRecord {
+  txHash           String   @id
+  orderId          String?
+  type             String
+  fromAddress      String?
+  toAddress        String?
+  valueWei         String?
+  blockNumber      Int?
+  status           String
+  createdAt        DateTime @default(now())
+
+  @@index([orderId])
+  @@index([type])
+  @@index([status])
+}
+
+model RobotSnapshot {
+  robotId          String   @id
+  name             String
+  service          String
+  ownerAddress     String
+  status           String
+  registered       Boolean
+  lastSyncedBlock  Int
+  updatedAt        DateTime @updatedAt
+}
+
+model SyncState {
+  id                 String   @id @default("blockchain")
+  lastProcessedBlock Int      @default(0)
+  lastProcessedHash  String?
+  updatedAt          DateTime @updatedAt
 }

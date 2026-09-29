@@ -1,23 +1,15 @@
 import hre from "hardhat";
-import promptSyncFactory from "prompt-sync";
 import { deployAll } from "../deploy.config";
 import { writeDeploymentAddresses } from "./lib/writeDeployment";
 
 async function main() {
   const network = hre.network.name;
 
-  if (!process.env.PRIVATE_KEY) {
-    throw new Error("PRIVATE_KEY not set. Copy .env.example to .env.local and set it.");
+  if (network !== "testnet" || hre.network.config.chainId !== 91562037) {
+    throw new Error("RoboPayEscrow can only be deployed to MST Testnet (chain ID 91562037).");
   }
-
-  if (network === "mainnet") {
-    console.log("\n🔴 DEPLOYING TO MAINNET");
-    console.log(`Chain ID: ${hre.network.config.chainId}\n`);
-    const promptSync = promptSyncFactory({ sigint: true });
-    const confirm = promptSync("Type 'yes, deploy to mainnet' to continue: ");
-    if (confirm !== "yes, deploy to mainnet") {
-      throw new Error("Deployment cancelled.");
-    }
+  if (!process.env.PRIVATE_KEY) {
+    throw new Error("PRIVATE_KEY is required in the secure deployment environment.");
   }
 
   console.log(`\nDeploying to ${network}...\n`);
@@ -41,9 +33,7 @@ async function main() {
   }
   console.log(`\nAddresses + ABIs written to packages/shared/src/contracts.ts`);
 
-  if (network !== "hardhat" && network !== "localhost") {
-    console.log(`\nNext: npm run verify:${network}\n`);
-  }
+  console.log("\nNext: npm run verify:testnet\n");
 }
 
 main().catch((error) => {

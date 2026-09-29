@@ -6,11 +6,10 @@
     "dev": "hardhat node",
     "compile": "hardhat compile",
     "test": "hardhat test",
-    "lint": "solhint 'contracts/**/*.sol'",
+    "lint": "solhint \"contracts/**/*.sol\"",
+    "mark:legacy": "hardhat run scripts/markLegacyDeployment.ts",
     "deploy:testnet": "hardhat run scripts/deploy.ts --network testnet",
-    "deploy:mainnet": "hardhat run scripts/deploy.ts --network mainnet",
     "verify:testnet": "hardhat run scripts/verify.ts --network testnet",
-    "verify:mainnet": "hardhat run scripts/verify.ts --network mainnet",
     "clean": "hardhat clean"
   },
   "dependencies": {

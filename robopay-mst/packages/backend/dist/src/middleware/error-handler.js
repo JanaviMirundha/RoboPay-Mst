@@ -1,3 +1,4 @@
+import { ZodError } from "zod";
 import { AppError } from "../utils/errors.js";
 export function registerErrorHandler(app) {
     app.setErrorHandler((error, _request, reply) => {
@@ -11,7 +12,7 @@ export function registerErrorHandler(app) {
             });
             return;
         }
-        if (error && error.validation) {
+        if (error instanceof ZodError || (typeof error === "object" && error !== null && "validation" in error)) {
             reply.status(400).send({
                 success: false,
                 error: {
@@ -19,6 +20,11 @@ export function registerErrorHandler(app) {
                     message: "Request validation failed.",
                 },
             });
+            return;
+        }
+        if (error instanceof Error && error.message.includes("Prisma")) {
+            app.log.error({ message: error.message }, "Database operation failed");
+            reply.status(500).send({ success: false, error: { code: "DATABASE_ERROR", message: "Database operation failed." } });
             return;
         }
         app.log.error(error);

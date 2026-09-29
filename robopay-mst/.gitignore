@@ -2,6 +2,8 @@ node_modules/
 .env
 .env.local
 .env*.local
+packages/backend/prisma/dev.db
+packages/frontend/tsconfig.tsbuildinfo
 
 # hardhat
 artifacts/

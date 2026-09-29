@@ -1,30 +1,73 @@
+import { getAddress } from "ethers";
+import { prisma } from "../database.js";
 import { blockchainService } from "./blockchain.service.js";
-export const robotStatusMap = {
-    0: "AVAILABLE",
-    1: "IN_USE",
-};
+import { ERRORS } from "../utils/errors.js";
 export class RobotService {
+    async getRobot(robotId) {
+        const robot = await blockchainService.getRobot(robotId);
+        const statusLabel = robot.registered
+            ? robot.status === 0 ? "AVAILABLE" : robot.status === 1 ? "IN_USE" : "UNKNOWN"
+            : "UNKNOWN";
+        const lastSyncedBlock = await blockchainService.getCurrentBlock();
+        await prisma.robotSnapshot.upsert({
+            where: { robotId },
+            update: {
+                name: robot.name,
+                service: robot.service,
+                ownerAddress: getAddress(robot.robotOwner),
+                status: statusLabel,
+                registered: robot.registered,
+                lastSyncedBlock,
+            },
+            create: {
+                robotId,
+                name: robot.name,
+                service: robot.service,
+                ownerAddress: getAddress(robot.robotOwner),
+                status: statusLabel,
+                registered: robot.registered,
+                lastSyncedBlock,
+            },
+        });
+        return { ...robot, robotOwner: getAddress(robot.robotOwner), statusLabel, lastSyncedBlock };
+    }
     async listRobots() {
         const robotIds = await blockchainService.getRobotIds();
-        const robots = await Promise.all(robotIds.map((id) => this.getRobot(id)));
-        return robots;
-    }
-    async getRobot(robotId) {
-        const data = await blockchainService.getRobot(robotId);
-        return {
-            ...data,
-            statusLabel: robotStatusMap[data.status] ?? "UNKNOWN",
-        };
+        return Promise.all(robotIds.map((robotId) => this.getRobot(robotId)));
     }
     async syncRobot(robotId) {
         return this.getRobot(robotId);
     }
     async getRobotStatus(robotId) {
         const robot = await this.getRobot(robotId);
+        return { robotId, status: robot.statusLabel, registered: robot.registered, blockNumber: robot.lastSyncedBlock };
+    }
+    async getActiveRental(robotId) {
+        const robot = await blockchainService.getRobot(robotId);
+        if (robot.status === 0)
+            return { robotId, active: false, rental: null };
+        if (robot.status !== 1)
+            throw ERRORS.INCONSISTENT_BLOCKCHAIN_STATE(`Unexpected on-chain status ${robot.status} for ${robotId}.`);
+        const orderIds = await blockchainService.getRentalOrderIds();
+        const rentals = await Promise.all(orderIds.map((orderId) => blockchainService.getRental(orderId)));
+        const matches = rentals.filter((rental) => rental.active && rental.robotId === robotId);
+        if (matches.length !== 1) {
+            throw ERRORS.INCONSISTENT_BLOCKCHAIN_STATE(`Robot ${robotId} is IN_USE on-chain, but ${matches.length} active matching rentals were found.`);
+        }
+        const rental = matches[0];
         return {
             robotId,
-            status: robot.status,
-            statusLabel: robot.statusLabel,
+            active: true,
+            rental: {
+                orderId: rental.orderId,
+                customer: getAddress(rental.customer),
+                service: rental.service,
+                durationMinutes: rental.durationMinutes,
+                startTime: rental.startTime.toString(),
+                endTime: rental.endTime.toString(),
+                status: rental.statusLabel,
+                paymentStatus: rental.escrowedAmountWei === rental.amountPaidWei ? "ESCROWED" : "UNKNOWN",
+            },
         };
     }
 }

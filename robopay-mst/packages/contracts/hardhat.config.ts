@@ -25,17 +25,10 @@ const config: HardhatUserConfig = {
       chainId: 91562037,
       accounts,
     },
-
-    mainnet: {
-      url: "https://mariorpc.mstblockchain.com",
-      chainId: 4646,
-      accounts,
-    },
   },
 
   etherscan: {
     apiKey: {
-      mainnet: process.env.MSTSCAN_API_KEY || "",
       testnet: process.env.MSTSCAN_API_KEY || "",
     },
 
@@ -49,14 +42,6 @@ const config: HardhatUserConfig = {
         },
       },
 
-      {
-        network: "mainnet",
-        chainId: 4646,
-        urls: {
-          apiURL: "https://mstscan.com/api",
-          browserURL: "https://mstscan.com",
-        },
-      },
     ],
   },
 };
